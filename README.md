@@ -43,6 +43,55 @@ c:\arrhythmia-detection-dashboard\
     └── assets/                # Aset proyek lokal (gambar, ikon SVG, dsb)
 ```
 
+## ⚙️ Cara Setup & Menjalankan Backend (Rust)
+
+Backend aplikasi ini dibangun dengan **Rust**, menggunakan **WebSocket** dan REST API, serta **SQLite** sebagai basis data utamanya.
+
+### Persyaratan (Prerequisites)
+- **Rust & Cargo**: Instal Rust melalui [rustup.rs](https://rustup.rs/).
+- **SQLite**: Database SQLite tersemat (embedded), biasanya tidak memerlukan instalasi server terpisah.
+
+### Langkah-langkah Instalasi
+1. **Navigasi ke Direktori**:
+   ```bash
+   cd c:\ecgrhythmia-backend
+   ```
+2. **Konfigurasi Environment** (Opsional):
+   Jika diperlukan, atur port dan *path* di file `.env` yang berada di direktori root.
+3. **Build & Run**:
+   ```bash
+   cargo run
+   ```
+   *Cargo akan secara otomatis mengunduh semua dependensi (crates), mengkompilasi aplikasi, dan menjalankannya.* 
+   Secara default, REST API berjalan di port `8081` dan WebSocket berjalan di port `8080`.
+
+---
+
+## 🗄️ Pemakaian Database (SQLite)
+
+Aplikasi ini menggunakan file `database.db` (SQLite) yang otomatis tersimpan di direktori utama backend.
+
+- **Fungsi Utama**: Menyimpan data persisten yang mencakup **Profil Pasien**, **Riwayat Pemeriksaan (Records)**, dan **Data Medis** lainnya.
+- **Inisialisasi Otomatis**: Saat backend pertama kali dijalankan, sistem akan otomatis membuat skema tabel (jika belum ada) dan dapat memuat data statis (*seeding*) agar API langsung siap diuji.
+- **Manajemen Mandiri**: Karena seluruh data berpusat di satu file `database.db`, Anda dapat dengan mudah melakukan *backup*, menghapus data (*reset*), atau melihat tabel menggunakan *tools* GUI eksternal seperti **DB Browser for SQLite**.
+
+---
+
+## 🌐 Sinkronisasi dengan PWA (Frontend)
+
+Backend didesain agar dapat tersinkronisasi mulus dengan aplikasi React (yang telah dikonfigurasi sebagai *Progressive Web App* / PWA).
+
+1. **Sinkronisasi Data Profil & Riwayat (REST API)**: 
+   Setiap kali pengguna melakukan pembaruan profil atau pengaturan perangkat di PWA, frontend mengirimkan *request* HTTP (seperti `POST` atau `PUT`) ke `http://127.0.0.1:8081/api/...`. Backend SQLite akan langsung menyimpan perubahan ini secara permanen.
+   
+2. **Komunikasi Real-Time (WebSocket)**:
+   PWA mengandalkan koneksi persisten ke `ws://127.0.0.1:8080` untuk menerima aliran (*streaming*) grafik detak jantung EKG tanpa *overhead* (hambatan) koneksi ulang HTTP biasa.
+   
+3. **Mekanisme Fallback (Mode Offline PWA)**:
+   Jika backend terputus atau dimatikan, antarmuka PWA dilengkapi dengan *Local Storage Fallback*. PWA tetap dapat dioperasikan secara fungsional (untuk berpindah halaman, melihat riwayat *cache*, atau menyimpan profil tiruan) berkat fitur *Service Worker* dan penyimpanan lokal, menjamin UX (Pengalaman Pengguna) yang tidak terputus.
+
+---
+
 ## ⚙️ Cara Setup & Menjalankan Frontend
 
 ### Persyaratan (Prerequisites)
@@ -73,9 +122,9 @@ c:\arrhythmia-detection-dashboard\
 
 ---
 
-## ⚙️ Sinkronisasi Backend
+## 🔄 Mekanisme Streaming WebSocket (Backend Internal)
 
-Dalam sistem ini, backend (Rust) memegang kendali penuh atas mekanisme pengaturan ritme pengiriman (sinkronisasi) aliran data EKG agar persis menyerupai alat fisik medis *real-time*.
+Dalam sistem ini, backend (Rust) memegang kendali penuh atas mekanisme pengaturan ritme pengiriman aliran data EKG (dari file CSV ke WebSocket) agar persis menyerupai alat fisik medis *real-time*.
 
 1. **Chunking Data (Pemaketan):** 
    Alih-alih mengirim titik koordinat satu per satu yang akan membuat jaringan kewalahan (karena *overhead* WebSocket), backend memotong (chunk) aliran data dalam bentuk *batch*.
