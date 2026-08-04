@@ -12,6 +12,7 @@ use std::error::Error;
 use std::fs::File;
 use crate::models::payload::RawECGData;
 
+#[allow(dead_code)]
 pub fn read_ecg_data(file_path: &str) -> Result<RawECGData, Box<dyn Error>> {
     let file = File::open(file_path)?;
     

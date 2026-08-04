@@ -3,49 +3,69 @@
  * Bertugas berlangganan (subscribe) data EKG dari MQTT Broker (Mosquitto)
  * dan meneruskannya ke handler WebSocket.
  */
-/* 
-use rumqttc::{Client, MqttOptions, QoS, Event, Packet};
+
+use rumqttc::{Client, MqttOptions, QoS, Event, Packet, Transport, TlsConfiguration};
 use std::thread;
 use std::time::Duration;
 
-pub fn start_mqtt_listener<F>(broker_host: &str, broker_port: u16, topic: &str, on_message: F)
+pub fn start_mqtt_listener<F>(broker_host: &str, broker_port: u16, topic: &str, on_message: F) -> Client
 where
     F: Fn(String) + Send + 'static,
 {
     let host = broker_host.to_string();
     let topic_name = topic.to_string();
 
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let client_id = format!("rust_ecg_bridge_{}", timestamp);
+    
+    let mut mqttoptions = MqttOptions::new(&client_id, &host, broker_port);
+    mqttoptions.set_keep_alive(Duration::from_secs(60));
+    // Perbesar limit ukuran payload hingga 10MB agar tidak error "payload size limit exceeded"
+    mqttoptions.set_max_packet_size(10 * 1024 * 1024, 10 * 1024 * 1024);
+    
+    // --- ADDED CREDENTIALS & TLS FOR HIVEMQ CLOUD ---
+    mqttoptions.set_credentials("ecg-undip", "undipjaya");
+    
+    if broker_port == 8883 {
+        mqttoptions.set_transport(Transport::Tls(TlsConfiguration::default()));
+    }
+
+    let (client, mut connection) = Client::new(mqttoptions, 10);
+    let client_clone = client.clone();
+    
+    println!("[MQTT] Mencoba menghubungkan ke Broker {}:{}...", host, broker_port);
+
     // Spawn thread khusus agar listener MQTT tidak mengganggu server WebSocket
     thread::spawn(move || {
-        let mut mqttoptions = MqttOptions::new("rust_ecg_bridge", &host, broker_port);
-        mqttoptions.set_keep_alive(Duration::from_secs(5));
-
-        let (client, mut connection) = Client::new(mqttoptions, 10);
-        
-        // Subscribe ke topik data EKG dari ESP32
-        if let Err(e) = client.subscribe(&topic_name, QoS::AtMostOnce) {
-            eprintln!("[MQTT] Gagal subscribe ke topik '{}': {}", topic_name, e);
-            return;
-        }
-
-        println!("[MQTT] Terhubung ke Broker {}:{} | Topik: {}", host, broker_port, topic_name);
-
         // Loop mendengarkan pesan yang masuk
         for notification in connection.iter() {
             match notification {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    println!("[MQTT] ✅ Berhasil terhubung secara riil ke Broker HiveMQ Cloud!");
+                    // Resubscribe every time connection is established
+                    if let Err(e) = client_clone.subscribe(&topic_name, QoS::AtLeastOnce) {
+                        eprintln!("[MQTT] Gagal mengirim permintaan subscribe: {}", e);
+                    }
+                }
+                Ok(Event::Incoming(Packet::SubAck(_))) => {
+                    println!("[MQTT] 📡 Berhasil berlangganan secara resmi ke topik: {}", topic_name);
+                }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    println!("[MQTT] 📥 Menerima data payload {} bytes dari topik '{}'", publish.payload.len(), publish.topic);
                     if let Ok(payload_str) = String::from_utf8(publish.payload.to_vec()) {
                         // Teruskan pesan JSON murni ke callback WebSocket
                         on_message(payload_str);
                     }
                 }
                 Err(e) => {
-                    eprintln!("[MQTT] Koneksi terputus/error: {}. Mencoba menghubungkan ulang...", e);
-                    thread::sleep(Duration::from_secs(1));
+                    eprintln!("[MQTT] Terputus atau error: {:?}. Mencoba menghubungkan kembali...", e);
+                    thread::sleep(Duration::from_secs(5));
                 }
                 _ => {}
             }
         }
     });
+
+    client
 }
-*/

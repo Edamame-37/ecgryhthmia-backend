@@ -1,75 +1,90 @@
-# ECG Rhythmia Backend
+# ECG Rhythmia - Sinkronisasi & Integrasi Frontend
 
-Backend server untuk streaming data Elektrokardiogram (EKG) real-time yang ditulis dalam bahasa Rust. Proyek ini bertugas untuk membaca dataset EKG (CSV) dan mentransmisikannya ke frontend (React) melalui protokol WebSocket dengan simulasi kecepatan real-time, serta menyediakan REST API untuk memindai dataset yang tersedia.
+Dokumentasi ini berfokus pada integrasi sisi **Frontend (React)** untuk memvisualisasikan data Elektrokardiogram (EKG) secara *real-time*, serta bagaimana frontend melakukan sinkronisasi dengan backend.
 
-## Arsitektur Proyek
+## 💻 Integrasi Frontend (React)
 
-Struktur folder dan file pada proyek ini dirancang secara modular:
+Aplikasi frontend (React/TypeScript) bertanggung jawab untuk dua fungsi utama: memvisualisasikan *streaming* data EKG yang dikirim oleh backend dan memuat daftar dataset (records) yang tersedia.
 
-```
-c:\ecgrhythmia-backend\
-├── Cargo.toml          # File konfigurasi Cargo (dependensi dan meta-data proyek)
-├── Cargo.lock          # Lock file untuk versi dependensi
-├── frame_000001_mv.csv # Contoh file dataset EKG
-└── src/
-    ├── main.rs         # Titik masuk (entry point) utama aplikasi
-    ├── api/
-    │   ├── mod.rs
-    │   └── routes.rs   # Menyediakan HTTP REST API murni untuk scan dataset
-    ├── data/
-    │   ├── mod.rs
-    │   └── csv_reader.rs # Modul untuk membaca dan mem-parsing data CSV EKG
-    ├── models/
-    │   ├── mod.rs
-    │   └── payload.rs  # Definisi struktur data (Payload/JSON) yang dikirim ke Frontend
-    └── network/
-        ├── mod.rs
-        ├── mqtt_listener.rs # (Opsional) Modul untuk subscribe data dari MQTT Broker (mis. Mosquitto)
-        └── websocket.rs # WebSocket Server untuk streaming data real-time ke Frontend
-```
+### 1. Komunikasi WebSocket (Streaming Real-Time)
+- **Koneksi:** Frontend terhubung ke server WebSocket backend pada alamat `ws://127.0.0.1:8080`.
+- **Format Data:** Data diterima dalam format JSON. Struktur data (Payload) dari backend dirancang agar 100% sejajar dengan antarmuka TypeScript di sisi frontend (misal: `ecgTypes.ts`), khususnya pada objek `RawECGData` (berisi properti array `time`, `ch1`, `ch2`, `ch3`).
+- **Render Visual:** Data yang diterima sudah dalam bentuk **murni milivolt (mV)** sehingga frontend tidak perlu lagi melakukan perhitungan kalibrasi multiplier/gain (*zero-overhead render*). Komponen grafik pada React cukup me-render nilai mentah ini secara langsung ke dalam bentuk gelombang EKG.
 
-## Fitur Utama
+### 2. Pengambilan Data Dataset (REST API)
+- **Koneksi HTTP:** Menggunakan pustaka *fetch* bawaan peramban atau Axios, frontend melakukan *request* HTTP `GET` ke REST API backend di `http://127.0.0.1:8081/api/records`.
+- **Fungsi:** Berguna untuk memuat dan menampilkan daftar ketersediaan file CSV dataset (seperti dari folder Chapman, PTB-XL, atau data simulasi Prosim) pada menu navigasi (sidebar/dropdown) di aplikasi React.
+- **CORS Terintegrasi:** REST API sisi server telah dikonfigurasi untuk mengizinkan *Cross-Origin Resource Sharing (CORS)* untuk semua origin (*Access-Control-Allow-Origin: \**), sehingga *request* langsung dari *dev server* frontend (misalnya `localhost:5173` atau `localhost:3000`) tidak akan diblokir oleh peramban (*browser*).
 
-1. **REST API (Port 8081):**
-   - Berjalan di thread terpisah.
-   - Endpoint `GET /api/records` digunakan untuk memindai folder dataset (`../dataset/`) dan mengembalikan daftar file EKG yang tersedia ke klien dalam format JSON. Mendukung CORS.
-   - Kategori dataset yang didukung: `chapman`, `ptbxl_100hz`, `ptbxl_500hz`, `prosim_simulator`, dan `sensor_records`.
+---
 
-2. **WebSocket Server (Port 8080):**
-   - Mentransmisikan data EKG secara berkesinambungan (continuous stream) ke klien Frontend.
-   - Menggunakan format data murni milivolt (mV) dengan 3 channel (Ch1, Ch2, Ch3).
-   - Melakukan chunking data (25 titik data per paket pada simulasi frekuensi sampling 250Hz) untuk meniru streaming alat medis real-time dengan sinkronisasi *delay* yang akurat.
-   - Data akan di-loop terus menerus (looping simulasi) saat mencapai akhir file.
+## 📂 Struktur Folder Frontend (`arrhythmia-detection-dashboard`)
 
-3. **Pembaca CSV yang Efisien:**
-   - Mengekstrak file CSV statis menjadi *struct* internal `RawECGData`.
-   - Menangani error parsing *float* jika ada data yang kosong/NaN (default ke `0.0`).
+Proyek antarmuka ini dibangun menggunakan **React**, **TypeScript**, **Vite**, dan **Tailwind CSS**. Arsitektur internal aplikasi (*Clean Architecture*) disusun agar kode lebih modular dan mudah dipelihara.
 
-## Persyaratan (Requirements)
-
-- **Rust & Cargo** (Edisi 2021)
-- File CSV EKG yang valid berada di lokasi yang dikonfigurasi (misal: `../frame_000001_mv.csv` atau di dalam folder `../dataset/`). File CSV minimal harus memiliki 4 kolom berurutan: Waktu, Ch1, Ch2, Ch3.
-
-## Cara Menjalankan
-
-1. Pastikan Anda berada di root direktori proyek.
-2. Jalankan aplikasi menggunakan `cargo`:
-
-```bash
-cargo run
+```text
+c:\arrhythmia-detection-dashboard\
+├── package.json               # Konfigurasi proyek, dependensi npm, dan script build/dev
+├── vite.config.ts             # Konfigurasi Vite (bundler frontend)
+├── tailwind.config.js         # Konfigurasi desain, warna, dan utilitas Tailwind CSS
+├── postcss.config.js          # Pengaturan PostCSS untuk Tailwind
+├── tsconfig.json              # Konfigurasi root TypeScript
+├── index.html                 # Halaman utama aplikasi (Entry HTML)
+├── public/                    # Aset statis yang tidak diproses oleh bundler
+└── src/                       # Kode sumber (*source code*) utama React
+    ├── main.tsx               # Titik awal masuk (Entry point) React (mounting ke index.html)
+    ├── App.tsx                # Komponen root aplikasi
+    ├── App.css / index.css    # Gaya global Tailwind
+    ├── application/           # Lapisan Application (Use cases, custom hooks, state management)
+    ├── core/                  # Lapisan Core (Tipe data, interface TypeScript, konfigurasi)
+    ├── data/                  # Lapisan Data (Akses API eksternal, klien WebSocket)
+    ├── presentation/          # Lapisan Presentation (Komponen UI React, layout, halaman)
+    ├── workers/               # (Opsional) Web Workers untuk komputasi asinkron (multithreading UI)
+    └── assets/                # Aset proyek lokal (gambar, ikon SVG, dsb)
 ```
 
-Saat berhasil dijalankan, Anda akan melihat output di terminal yang mengindikasikan:
-- Inisialisasi sistem medis.
-- REST API Server HTTP berjalan di `http://127.0.0.1:8081/api/records`.
-- Jumlah baris data yang berhasil dimuat dari CSV.
-- WebSocket Server berjalan di `ws://127.0.0.1:8080`.
+## ⚙️ Cara Setup & Menjalankan Frontend
 
-## Dependensi
+### Persyaratan (Prerequisites)
+- **Node.js** (Rekomendasi versi LTS 18.x atau ke atas).
+- Manajer paket seperti **npm** (biasanya terpasang otomatis bersama Node.js).
 
-- `tungstenite = "0.20"` - Untuk implementasi server WebSocket.
-- `serde = { version = "1.0", features = ["derive"] }` - Untuk serialisasi & deserialisasi data (seperti ke JSON).
-- `serde_json = "1.0"` - Digunakan bersama serde untuk parsing payload JSON.
-- `csv = "1.3"` - Untuk membaca dan mem-parsing data CSV dengan cepat dan efisien.
+### Langkah-langkah Menjalankan
 
-*(Catatan: Library `rumqttc` disertakan pada `Cargo.toml` sebagai referensi jika akan mengaktifkan klien MQTT untuk integrasi perangkat hardware masa depan).*
+1. **Buka Terminal** baru, lalu arahkan navigasi ke direktori proyek frontend:
+   ```bash
+   cd c:\arrhythmia-detection-dashboard
+   ```
+2. **Instalasi Dependensi**. Jalankan perintah ini (hanya perlu dilakukan pertama kali atau jika ada penambahan pustaka baru):
+   ```bash
+   npm install
+   ```
+3. **Jalankan *Development Server***:
+   ```bash
+   npm run dev
+   ```
+4. **Buka Aplikasi di Browser**. 
+   Secara *default*, Vite akan menjalankan aplikasi di `http://localhost:5173` (perhatikan log di terminal Anda untuk tautan spesifik). Buka tautan tersebut menggunakan peramban web favorit Anda.
+
+### Perintah Tambahan (NPM Scripts)
+- `npm run build`: Melakukan proses kompilasi TypeScript dan mem-*build* aplikasi agar siap di-*deploy* ke tahap produksi (berada di folder `dist/`).
+- `npm run lint`: Memeriksa potensi kesalahan/standar kode dengan cepat (memanfaatkan `oxlint`).
+- `npm run preview`: Membuka server lokal (*preview*) untuk melihat dan menguji *build* versi produksi yang telah dikompilasi sebelumnya.
+
+---
+
+## ⚙️ Sinkronisasi Backend
+
+Dalam sistem ini, backend (Rust) memegang kendali penuh atas mekanisme pengaturan ritme pengiriman (sinkronisasi) aliran data EKG agar persis menyerupai alat fisik medis *real-time*.
+
+1. **Chunking Data (Pemaketan):** 
+   Alih-alih mengirim titik koordinat satu per satu yang akan membuat jaringan kewalahan (karena *overhead* WebSocket), backend memotong (chunk) aliran data dalam bentuk *batch*.
+   
+2. **Frekuensi Sampling (250Hz):** 
+   Sistem diatur pada asumsi frekuensi *sampling rate* dasar 250Hz. Backend mengelompokkan secara spesifik **25 sampel data** menjadi satu *chunk* paket transmisi.
+   
+3. **Delay Real-Time Presisi:** 
+   Dalam *sampling rate* 250Hz, 25 sampel merepresentasikan durasi waktu tepat **100 milidetik (ms)**. Oleh karena itu, *thread* pengiriman backend akan menerapkan sinkronisasi jeda waktu otomatis (*sleep_duration*) selama 100ms setiap kali selesai mengirimkan satu *chunk* paket ke frontend.
+   
+4. **Aliran Tanpa Henti (Seamless Looping):** 
+   Skema ini menjamin kelancaran *streaming real-time* yang sangat konsisten, setara dengan kecepatan sapuan standar perekaman di atas kertas termal EKG (25 mm/s). Ketika pointer pembacaan backend telah mencapai titik data terakhir pada file rekaman CSV, sistem akan otomatis mereset siklus dari titik nol (*looping*), mensimulasikan aliran detak jantung pasien yang terus menyala.
