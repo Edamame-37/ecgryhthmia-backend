@@ -321,6 +321,24 @@ fn handle_http_client(mut stream: TcpStream, mqtt_client: rumqttc::Client) {
         } else if method == "GET" && path == "/api/admin/devices" {
             let devices = get_devices_from_db();
             ("200 OK", serde_json::to_string(&devices).unwrap_or_else(|_| "[]".to_string()))
+        } else if method == "GET" && path == "/api/patients" {
+            let conn = crate::db::sqlite::open_encrypted_db("database.db").unwrap();
+            let mut stmt = conn.prepare("SELECT id, first_name, last_name, date_of_birth, gender FROM patients").unwrap();
+            let patients_iter = stmt.query_map([], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "name": format!("{} {}", row.get::<_, String>(1).unwrap_or_default(), row.get::<_, String>(2).unwrap_or_default()).trim().to_string(),
+                    "date_of_birth": row.get::<_, String>(3).unwrap_or_default(),
+                    "gender": row.get::<_, String>(4).unwrap_or_default()
+                }))
+            }).unwrap();
+            let mut patients_list = Vec::new();
+            for p in patients_iter {
+                if let Ok(p) = p {
+                    patients_list.push(p);
+                }
+            }
+            ("200 OK", serde_json::to_string(&patients_list).unwrap_or_else(|_| "[]".to_string()))
         } else if method == "GET" && path.starts_with("/api/patients/") && path.ends_with("/sessions") {
             let patient_id = path.replace("/api/patients/", "").replace("/sessions", "");
             if !patient_id.is_empty() {
@@ -406,8 +424,14 @@ fn handle_http_client(mut stream: TcpStream, mqtt_client: rumqttc::Client) {
             #[derive(Deserialize)]
             struct DeviceCommand {
                 command: String,
+                patient_id: Option<String>,
             }
             if let Ok(cmd) = serde_json::from_str::<DeviceCommand>(request_body) {
+                if let Some(pid) = cmd.patient_id {
+                    if let Ok(conn) = crate::db::sqlite::open_encrypted_db("database.db") {
+                        let _ = conn.execute("UPDATE devices SET assigned_to = ?1 WHERE name = ?2", params![pid, device_id]);
+                    }
+                }
                 let topic = format!("ecgrhythmia/{}/command", device_id);
                 if let Err(e) = mqtt_client.clone().publish(topic, rumqttc::QoS::AtLeastOnce, false, cmd.command) {
                     ("500 Internal Server Error", format!("{{\"success\":false,\"message\":\"Gagal mengirim perintah: {}\"}}", e))

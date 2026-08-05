@@ -159,9 +159,15 @@ pub fn start_db_worker(db_path: &str) -> Sender<DevicePayload> {
                 session_map.insert(payload.session_id.clone(), new_id.clone());
                 
                 let initial_file_path = format!("records/{}.jsonl", new_id);
+                let patient_id: Option<String> = conn.query_row(
+                    "SELECT assigned_to FROM devices WHERE id = ?1 AND assigned_to != 'Unassigned'",
+                    params![dev_id],
+                    |row| row.get(0)
+                ).ok();
+
                 if let Err(e) = conn.execute(
-                    "INSERT INTO sessions (id, device_id, patient_id, started_at, file_path) VALUES (?1, ?2, NULL, ?3, ?4)",
-                    params![new_id, dev_id, payload.created_at, initial_file_path]
+                    "INSERT INTO sessions (id, device_id, patient_id, started_at, file_path) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![new_id, dev_id, patient_id, payload.created_at, initial_file_path]
                 ) {
                     eprintln!("[Database] Gagal INSERT sesi: {}", e);
                     continue;
