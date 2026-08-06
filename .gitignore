@@ -1,0 +1,25 @@
+# Rust Build Artifacts
+target/
+target_temp/
+**/*.rs.bk
+
+# Environment Variables
+.env
+.env.*
+
+# SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# User Generated Data / Runtime Folders
+/uploads/
+/records/
+
+# Logs
+*.log
+
+# IDEs and Editors
+.vscode/
+.idea/
+.DS_Store
