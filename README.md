@@ -43,37 +43,56 @@ c:\arrhythmia-detection-dashboard\
     └── assets/                # Aset proyek lokal (gambar, ikon SVG, dsb)
 ```
 
-## ⚙️ Cara Setup & Menjalankan Backend (Rust)
+## ⚙️ Cara Setup & Menjalankan Backend (Rust - Production-Ready)
 
-Backend aplikasi ini dibangun dengan **Rust**, menggunakan **WebSocket** dan REST API, serta **SQLite** sebagai basis data utamanya.
+Backend aplikasi ini dibangun menggunakan **Rust** dengan framework web asinkron **Axum**, sistem database connection pooling **r2d2** (terintegrasi SQLite + SQLCipher), dan logging terstruktur menggunakan **tracing**.
 
 ### Persyaratan (Prerequisites)
 - **Rust & Cargo**: Instal Rust melalui [rustup.rs](https://rustup.rs/).
-- **SQLite**: Database SQLite tersemat (embedded), biasanya tidak memerlukan instalasi server terpisah.
+- **SQLite**: Database SQLite tertanam terenkripsi via SQLCipher, tidak memerlukan server terpisah.
 
-### Langkah-langkah Instalasi
+### Langkah-langkah Instalasi & Konfigurasi
 1. **Navigasi ke Direktori**:
    ```bash
-   cd c:\ecgrhythmia-backend
+   cd \ecgrhythmia-backend
    ```
-2. **Konfigurasi Environment** (Opsional):
-   Jika diperlukan, atur port dan *path* di file `.env` yang berada di direktori root.
+2. **Konfigurasi Berkas `.env`**:
+   Buat berkas `.env` di root direktori backend Anda berdasarkan struktur berikut (kosongkan nilai kredensial untuk deployment produksi demi keamanan):
+   ```env
+   HOST_IP=127.0.0.1
+   REST_PORT=8081
+   WS_PORT=8080
+
+   # Konfigurasi & Kredensial Medis (Diisi pada saat Deployment)
+   MQTT_BROKER=
+   MQTT_PORT=8883
+   MQTT_TOPIC=
+   MQTT_USERNAME=
+   MQTT_PASSWORD=
+
+   # Kunci Keamanan & Sesi
+   JWT_SECRET=
+   SQLITE_KEY=
+   DB_PATH=database.db
+   ```
+   *Catatan:* Jika `REST_PORT` dan `WS_PORT` disamakan (misalnya keduanya `8080`), server Axum akan otomatis menyatu pada satu port tunggal (REST API melayani di `/api` dan WebSocket di `/`).
+
 3. **Build & Run**:
    ```bash
    cargo run
    ```
-   *Cargo akan secara otomatis mengunduh semua dependensi (crates), mengkompilasi aplikasi, dan menjalankannya.* 
-   Secara default, REST API berjalan di port `8081` dan WebSocket berjalan di port `8080`.
+   *Cargo akan mengunduh dependensi (crates), melakukan kompilasi asinkron, menjalankan migrasi database otomatis, dan menyalakan server.*
 
 ---
 
-## 🗄️ Pemakaian Database (SQLite)
+## 🗄️ Pemakaian Database (SQLite + SQLCipher)
 
-Aplikasi ini menggunakan file `database.db` (SQLite) yang otomatis tersimpan di direktori utama backend.
+Aplikasi ini menggunakan database terenkripsi SQLite (`database.db`) yang otomatis dibuat pada direktori utama backend.
 
-- **Fungsi Utama**: Menyimpan data persisten yang mencakup **Profil Pasien**, **Riwayat Pemeriksaan (Records)**, dan **Data Medis** lainnya.
-- **Inisialisasi Otomatis**: Saat backend pertama kali dijalankan, sistem akan otomatis membuat skema tabel (jika belum ada) dan dapat memuat data statis (*seeding*) agar API langsung siap diuji.
-- **Manajemen Mandiri**: Karena seluruh data berpusat di satu file `database.db`, Anda dapat dengan mudah melakukan *backup*, menghapus data (*reset*), atau melihat tabel menggunakan *tools* GUI eksternal seperti **DB Browser for SQLite**.
+- **Fungsi Utama**: Menyimpan data persisten yang mencakup **Akun Pengguna**, **Profil Dokter & Pasien**, **Status Perangkat**, dan **Riwayat Sesi Medis**.
+- **Database Connection Pooling (`r2d2`)**: Akses database dikelola menggunakan connection pool terbagi untuk meningkatkan kecepatan pemrosesan data paralel dan mencegah error *database locked*.
+- **Enkripsi Kunci SQLCipher**: Database diamankan dengan mengenkripsi seluruh file menggunakan `SQLITE_KEY` yang diinisialisasi otomatis pada setiap koneksi baru di pool.
+- **Inisialisasi & Migrasi Otomatis**: Saat backend pertama kali dijalankan, sistem akan otomatis mengeksekusi migrasi skema tabel (jika belum ada) dan mendaftarkan perangkat default agar siap digunakan.
 
 ---
 

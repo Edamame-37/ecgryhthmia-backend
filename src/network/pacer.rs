@@ -1,18 +1,17 @@
-use std::sync::mpsc::{channel, Sender};
-use std::thread;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use std::time::Duration;
 use crate::models::device::DevicePayload;
 use crate::models::payload::{ECGDataPayload, RawECGData, ServerMessage};
 use crate::network::websocket::ClientList;
+use tracing::{info, error};
 
-pub fn start_pacer(clients: ClientList) -> Sender<DevicePayload> {
-    let (tx, rx) = channel::<DevicePayload>();
+pub fn start_pacer(clients: ClientList) -> UnboundedSender<DevicePayload> {
+    let (tx, mut rx) = unbounded_channel::<DevicePayload>();
 
-    thread::spawn(move || {
-        println!("[Pacer] Thread pengatur laju (pacer) berjalan...");
+    tokio::spawn(async move {
+        info!("[Pacer] Thread pengatur laju (pacer) berjalan secara asinkron...");
         
-        for device_data in rx {
-            // Asumsi format samples: [[lead1, lead2, lead3], ...]
+        while let Some(device_data) = rx.recv().await {
             let total_samples = device_data.ecg.samples.len();
             if total_samples == 0 {
                 continue;
@@ -20,7 +19,7 @@ pub fn start_pacer(clients: ClientList) -> Sender<DevicePayload> {
 
             let fs = device_data.sampling_rate_hz;
             if fs <= 0.0 {
-                eprintln!("[Pacer] Sampling rate tidak valid ({} Hz). Mengabaikan data.", fs);
+                error!("[Pacer] Sampling rate tidak valid ({} Hz). Mengabaikan data.", fs);
                 continue;
             }
 
@@ -85,7 +84,7 @@ pub fn start_pacer(clients: ClientList) -> Sender<DevicePayload> {
                     });
                 }
 
-                thread::sleep(sleep_duration);
+                tokio::time::sleep(sleep_duration).await;
                 i = end;
             }
         }

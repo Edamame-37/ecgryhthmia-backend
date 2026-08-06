@@ -8,7 +8,14 @@ use rumqttc::{Client, MqttOptions, QoS, Event, Packet, Transport, TlsConfigurati
 use std::thread;
 use std::time::Duration;
 
-pub fn start_mqtt_listener<F>(broker_host: &str, broker_port: u16, topic: &str, on_message: F) -> Client
+pub fn start_mqtt_listener<F>(
+    broker_host: &str,
+    broker_port: u16,
+    topic: &str,
+    username: &str,
+    password: &str,
+    on_message: F
+) -> Client
 where
     F: Fn(String) + Send + 'static,
 {
@@ -25,7 +32,7 @@ where
     mqttoptions.set_max_packet_size(10 * 1024 * 1024, 10 * 1024 * 1024);
     
     // --- ADDED CREDENTIALS & TLS FOR HIVEMQ CLOUD ---
-    mqttoptions.set_credentials("ecg-undip", "undipjaya");
+    mqttoptions.set_credentials(username, password);
     
     if broker_port == 8883 {
         mqttoptions.set_transport(Transport::Tls(TlsConfiguration::default()));

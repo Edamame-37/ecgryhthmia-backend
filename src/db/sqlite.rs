@@ -1,127 +1,127 @@
-use std::thread;
-use std::sync::mpsc::{channel, Sender, Receiver};
 use std::collections::HashMap;
-use rusqlite::{params, Connection};
 use std::fs::OpenOptions;
 use std::io::Write;
+use rusqlite::{params, Connection};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use crate::models::device::DevicePayload;
+use tracing::{info, error};
 
-pub fn open_encrypted_db(db_path: &str) -> Result<Connection, rusqlite::Error> {
-    let conn = Connection::open(db_path)?;
-    dotenvy::dotenv().ok();
-    let db_key = std::env::var("SQLITE_KEY").unwrap_or_else(|_| "ecgrhythmia-super-secret-key-2026".to_string());
-    conn.execute_batch(&format!("PRAGMA key = '{}';", db_key))?;
-    Ok(conn)
+pub type DbPool = Pool<SqliteConnectionManager>;
+
+#[derive(Debug)]
+pub struct SqlcipherCustomizer {
+    pub key: String,
 }
 
-pub fn start_db_worker(db_path: &str) -> Sender<DevicePayload> {
-    let (tx, rx): (Sender<DevicePayload>, Receiver<DevicePayload>) = channel();
-    let db_path_str = db_path.to_string();
+impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for SqlcipherCustomizer {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        conn.execute_batch(&format!("PRAGMA key = '{}';", self.key))?;
+        Ok(())
+    }
+}
 
-    thread::spawn(move || {
-        println!("[Database] Menghubungkan ke SQLite lokal: {}...", db_path_str);
-        
-        let conn = match Connection::open(&db_path_str) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[Database] Gagal membuka file SQLite: {}", e);
-                return;
-            }
-        };
+pub fn create_pool(db_path: &str, db_key: &str) -> DbPool {
+    let manager = SqliteConnectionManager::file(db_path);
+    let customizer = SqlcipherCustomizer { key: db_key.to_string() };
+    Pool::builder()
+        .connection_customizer(Box::new(customizer))
+        .build(manager)
+        .expect("Gagal membuat connection pool SQLite")
+}
 
-        // Load DB Key from .env or use fallback
-        dotenvy::dotenv().ok();
-        let db_key = std::env::var("SQLITE_KEY").unwrap_or_else(|_| "ecgrhythmia-super-secret-key-2026".to_string());
-        
-        // Aktifkan enkripsi SQLCipher
-        if let Err(e) = conn.execute_batch(&format!("PRAGMA key = '{}';", db_key)) {
-            eprintln!("[Database] Gagal mengatur kunci enkripsi: {}", e);
-            return;
-        }
-
-        // Auto-Migration: Membuat tabel jika belum ada
-        let create_tables_query = "
-            CREATE TABLE IF NOT EXISTS accounts (
-                id TEXT PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                profile_photo TEXT,
-                status TEXT DEFAULT 'Offline'
-            );
-
-            CREATE TABLE IF NOT EXISTS doctors (
-                id TEXT PRIMARY KEY,
-                account_id TEXT,
-                first_name TEXT NOT NULL,
-                last_name TEXT NOT NULL,
-                FOREIGN KEY(account_id) REFERENCES accounts(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS patients (
-                id TEXT PRIMARY KEY,
-                account_id TEXT,
-                primary_doctor_id TEXT,
-                first_name TEXT NOT NULL,
-                last_name TEXT NOT NULL,
-                date_of_birth TEXT NOT NULL,
-                gender TEXT NOT NULL,
-                FOREIGN KEY(account_id) REFERENCES accounts(id),
-                FOREIGN KEY(primary_doctor_id) REFERENCES doctors(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS devices (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                mac TEXT,
-                battery INTEGER,
-                status TEXT,
-                assigned_to TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                device_id TEXT NOT NULL,
-                patient_id TEXT,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                file_path TEXT NOT NULL,
-                confirmation INTEGER,
-                doc_classification TEXT,
-                FOREIGN KEY(device_id) REFERENCES devices(id),
-                FOREIGN KEY(patient_id) REFERENCES patients(id)
-            );
-        ";
-
-        if let Err(e) = conn.execute_batch(create_tables_query) {
-            eprintln!("[Database] Gagal membuat tabel-tabel: {}", e);
-            return;
-        }
-
-        // Jalankan migrasi kolom bila tabel lama sudah ada namun belum memiliki kolom baru ini
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN confirmation INTEGER;", params![]);
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN doc_classification TEXT;", params![]);
-        
-        let _ = conn.execute("ALTER TABLE devices ADD COLUMN mac TEXT;", params![]);
-        let _ = conn.execute("ALTER TABLE devices ADD COLUMN battery INTEGER;", params![]);
-        let _ = conn.execute("ALTER TABLE devices ADD COLUMN status TEXT;", params![]);
-        let _ = conn.execute("ALTER TABLE devices ADD COLUMN assigned_to TEXT;", params![]);
-        let _ = conn.execute("ALTER TABLE accounts ADD COLUMN status TEXT DEFAULT 'Offline';", params![]);
-        
-        // Pre-register configured devices so they appear online immediately
-        let _ = conn.execute(
-            "INSERT OR IGNORE INTO devices (id, name, mac, battery, status, assigned_to) VALUES ('dev_001', 'device01', '00:1A:2B:3C:4D:5E', 100, 'Active', 'pat000000000001');",
-            params![]
+pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let create_tables_query = "
+        CREATE TABLE IF NOT EXISTS accounts (
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            profile_photo TEXT,
+            status TEXT DEFAULT 'Offline'
         );
 
-        println!("[Database] Seluruh tabel siap. Menunggu data masuk...");
+        CREATE TABLE IF NOT EXISTS doctors (
+            id TEXT PRIMARY KEY,
+            account_id TEXT,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        );
 
+        CREATE TABLE IF NOT EXISTS patients (
+            id TEXT PRIMARY KEY,
+            account_id TEXT,
+            primary_doctor_id TEXT,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL,
+            date_of_birth TEXT NOT NULL,
+            gender TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(primary_doctor_id) REFERENCES doctors(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS devices (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            mac TEXT,
+            battery INTEGER,
+            status TEXT,
+            assigned_to TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            patient_id TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            file_path TEXT NOT NULL,
+            confirmation INTEGER,
+            doc_classification TEXT,
+            FOREIGN KEY(device_id) REFERENCES devices(id),
+            FOREIGN KEY(patient_id) REFERENCES patients(id)
+        );
+    ";
+
+    conn.execute_batch(create_tables_query)?;
+
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN confirmation INTEGER;", params![]);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN doc_classification TEXT;", params![]);
+    
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mac TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN battery INTEGER;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN status TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN assigned_to TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE accounts ADD COLUMN status TEXT DEFAULT 'Offline';", params![]);
+    
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO devices (id, name, mac, battery, status, assigned_to) VALUES ('dev_001', 'device01', '00:1A:2B:3C:4D:5E', 100, 'Active', 'pat000000000001');",
+        params![]
+    );
+
+    Ok(())
+}
+
+pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
+    let (tx, mut rx) = unbounded_channel::<DevicePayload>();
+
+    tokio::spawn(async move {
+        info!("[Database] Background writer task berjalan...");
         let mut device_map: HashMap<String, String> = HashMap::new();
         let mut session_map: HashMap<String, String> = HashMap::new();
 
-        // Background loop untuk menerima dan menyimpan data
-        for payload in rx {
+        while let Some(payload) = rx.recv().await {
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("[Database] Gagal mendapatkan koneksi dari pool: {}", e);
+                    continue;
+                }
+            };
+
             // 1. Dapatkan atau buat device ID internal (dev...)
             let dev_id = if let Some(id) = device_map.get(&payload.device_id) {
                 id.clone()
@@ -142,7 +142,7 @@ pub fn start_db_worker(db_path: &str) -> Sender<DevicePayload> {
                             "INSERT INTO devices (id, name, mac, battery, status, assigned_to) VALUES (?1, ?2, 'Unknown', 100, 'Active', 'Unassigned')",
                             params![new_id, payload.device_id]
                         ) {
-                            eprintln!("[Database] Gagal INSERT device: {}", e);
+                            error!("[Database] Gagal INSERT device: {}", e);
                             continue;
                         }
                         device_map.insert(payload.device_id.clone(), new_id.clone());
@@ -169,7 +169,7 @@ pub fn start_db_worker(db_path: &str) -> Sender<DevicePayload> {
                     "INSERT INTO sessions (id, device_id, patient_id, started_at, file_path) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![new_id, dev_id, patient_id, payload.created_at, initial_file_path]
                 ) {
-                    eprintln!("[Database] Gagal INSERT sesi: {}", e);
+                    error!("[Database] Gagal INSERT sesi: {}", e);
                     continue;
                 }
                 new_id
@@ -182,21 +182,28 @@ pub fn start_db_worker(db_path: &str) -> Sender<DevicePayload> {
             let json_string = match serde_json::to_string(&payload) {
                 Ok(val) => val,
                 Err(e) => {
-                    eprintln!("[Database] Gagal serialisasi payload ke JSON: {}", e);
+                    error!("[Database] Gagal serialisasi payload ke JSON: {}", e);
                     continue;
                 }
             };
 
+            // Memastikan folder records ada
+            if let Some(parent) = std::path::Path::new(&file_path).parent() {
+                if !parent.exists() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+
             let mut file = match OpenOptions::new().create(true).append(true).open(&file_path) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("[Database] Gagal membuka file rekaman: {}", e);
+                    error!("[Database] Gagal membuka file rekaman {}: {}", file_path, e);
                     continue;
                 }
             };
 
             if let Err(e) = writeln!(file, "{}", json_string) {
-                eprintln!("[Database] Gagal menulis baris ke file {}: {}", file_path, e);
+                error!("[Database] Gagal menulis baris ke file {}: {}", file_path, e);
                 continue;
             }
         }
