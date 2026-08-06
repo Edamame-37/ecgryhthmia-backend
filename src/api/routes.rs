@@ -17,7 +17,7 @@ use axum::{
     response::IntoResponse,
 };
 use tower_http::cors::{CorsLayer, Any};
-use tracing::{info, error};
+use tracing::error;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +34,7 @@ pub struct Claims {
     pub exp: usize,
 }
 
+#[allow(dead_code)]
 pub struct AdminClaims(pub Claims);
 
 #[async_trait]
@@ -69,6 +70,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub struct UserClaims(pub Claims);
 
 #[async_trait]
