@@ -12,7 +12,7 @@ use axum::{
     async_trait,
     routing::{get, post},
     Router,
-    extract::{Path as AxumPath, State, Query, Json, FromRequestParts},
+    extract::{Path as AxumPath, State, Query, Json, FromRequestParts, FromRef},
     http::{request::Parts, StatusCode, Method},
     response::IntoResponse,
 };
