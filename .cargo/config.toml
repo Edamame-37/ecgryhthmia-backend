@@ -1,0 +1,2 @@
+[env]
+OPENSSL_DIR = { value = "openssl-custom", relative = true }
