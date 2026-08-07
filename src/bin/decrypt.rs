@@ -1,11 +1,17 @@
+use dotenvy::dotenv;
+use std::env;
 use rusqlite::Connection;
 
 fn main() -> Result<(), rusqlite::Error> {
+    dotenv().ok();
+    let sqlite_key = env::var("SQLITE_KEY")
+        .expect("[Decrypt] ERROR: SQLITE_KEY belum diset di .env!");
+
     println!("Membuka database terenkripsi...");
     let conn = Connection::open("database.db")?;
     
     // Setel kunci untuk mendekripsi database.db
-    conn.execute_batch("PRAGMA key = 'ecgrhythmia-super-secret-key-2026';")?;
+    conn.execute_batch(&format!("PRAGMA key = '{}';", sqlite_key))?;
 
     println!("Mengekspor data ke format plaintext (database_decrypted.db)...");
     

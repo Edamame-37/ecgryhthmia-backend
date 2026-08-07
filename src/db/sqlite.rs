@@ -31,7 +31,7 @@ pub fn create_pool(db_path: &str, db_key: &str) -> DbPool {
         .expect("Gagal membuat connection pool SQLite")
 }
 
-pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str) -> Result<(), rusqlite::Error> {
     let create_tables_query = "
         CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY,
@@ -101,6 +101,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         "INSERT OR IGNORE INTO devices (id, name, mac, battery, status, assigned_to) VALUES ('dev_001', 'device01', '00:1A:2B:3C:4D:5E', 100, 'Active', 'pat000000000001');",
         params![]
     );
+
+    if let Ok(admin_hash) = bcrypt::hash(admin_password, bcrypt::DEFAULT_COST) {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO accounts (id, email, password_hash, role, created_at, status) VALUES ('acc_admin', ?1, ?2, 'admin', datetime('now'), 'Offline');",
+            params![admin_email, admin_hash]
+        );
+    }
 
     Ok(())
 }

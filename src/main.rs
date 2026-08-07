@@ -28,7 +28,7 @@ async fn main() {
     // Lakukan auto-migration skema database pada saat startup
     {
         let conn = pool.get().expect("Gagal mendapatkan koneksi DB awal untuk migrasi");
-        if let Err(e) = db::sqlite::run_migrations(&conn) {
+        if let Err(e) = db::sqlite::run_migrations(&conn, &config.default_admin_email, &config.default_admin_password) {
             error!("Gagal menjalankan auto-migrations database: {}", e);
             panic!("Database migration failed: {}", e);
         }
@@ -44,40 +44,56 @@ async fn main() {
     // 6. Jalankan Background Database Worker untuk menulis data asinkron
     let db_tx = db::sqlite::start_db_worker(pool.clone());
 
-    // 7. Jalankan MQTT Listener
-    // Catatan: MQTT Listener berjalan di thread tersendiri
-    let mqtt_pacer_tx = pacer_tx.clone();
-    let mqtt_db_tx = db_tx.clone();
-    let mqtt_client = network::mqtt_listener::start_mqtt_listener(
-        &config.mqtt_broker,
-        config.mqtt_port,
-        &config.mqtt_topic,
-        &config.mqtt_username,
-        &config.mqtt_password,
-        move |payload_str| {
-            match serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
-                Ok(device_payload) => {
-                    // Teruskan ke Pacer
-                    if let Err(e) = mqtt_pacer_tx.send(device_payload.clone()) {
-                        error!("[Main] Gagal mengirim data ke Pacer: {}", e);
+    // 7. Load Devices and start MQTT Listeners dynamically
+    let mqtt_clients = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    
+    {
+        if let Ok(conn) = pool.get() {
+            if let Ok(mut stmt) = conn.prepare("SELECT name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices") {
+                if let Ok(device_iter) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u16>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                }) {
+                    for device in device_iter {
+                        if let Ok((name, broker, port, topic, username, password)) = device {
+                            let pacer_tx_clone = pacer_tx.clone();
+                            let db_tx_clone = db_tx.clone();
+                            
+                            let client = network::mqtt_listener::start_mqtt_listener(
+                                &broker,
+                                port,
+                                &topic,
+                                &username,
+                                &password,
+                                move |payload_str| {
+                                    if let Ok(device_payload) = serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
+                                        let _ = pacer_tx_clone.send(device_payload.clone());
+                                        let _ = db_tx_clone.send(device_payload);
+                                    }
+                                }
+                            );
+                            
+                            let mut clients_map = mqtt_clients.write().await;
+                            clients_map.insert(name, client);
+                        }
                     }
-
-                    // Teruskan ke Database Worker
-                    if let Err(e) = mqtt_db_tx.send(device_payload) {
-                        error!("[Main] Gagal mengirim data ke DB Worker: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("[Main] Menerima JSON MQTT yang tidak valid atau tidak sesuai format: {}", e);
                 }
             }
         }
-    );
+    }
 
     // 8. Setup Router Axum untuk REST API + WebSocket
     let app_state = api::routes::AppState {
         pool: pool.clone(),
-        mqtt_client: mqtt_client.clone(),
+        mqtt_clients: mqtt_clients.clone(),
+        pacer_tx: pacer_tx.clone(),
+        db_tx: db_tx.clone(),
         jwt_secret: config.jwt_secret.clone(),
         api_url: format!("http://{}:{}", config.host_ip, config.rest_port),
     };
