@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post},
     Router,
     extract::{Path as AxumPath, State, Query, Json, FromRequestParts, FromRef},
-    http::{request::Parts, StatusCode, Method},
+    http::{request::Parts, StatusCode, Method, HeaderValue},
     response::IntoResponse,
 };
 use tower_http::cors::{CorsLayer, Any};
@@ -901,7 +901,14 @@ fn read_jsonl_file(session_id: &str) -> String {
 // AXUM ROUTER GENERATOR
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin([
+            "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
+            "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5173".parse::<HeaderValue>().unwrap(),
+            "http://localhost:3000".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:3000".parse::<HeaderValue>().unwrap(),
+        ])
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
         .allow_headers(Any);
 
