@@ -900,13 +900,25 @@ fn read_jsonl_file(session_id: &str) -> String {
 
 // AXUM ROUTER GENERATOR
 pub fn create_router(state: AppState) -> Router {
+    // Izinkan origin baik yang menggunakan www maupun tanpa www
     let cors = CorsLayer::new()
         .allow_origin([
             "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
             "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
         ])
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::ACCEPT,
+        ])
+        .allow_credentials(true);
 
     Router::new()
         .route("/api/auth/register", post(register_handler))
