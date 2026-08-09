@@ -901,8 +901,10 @@ fn read_jsonl_file(session_id: &str) -> String {
 // AXUM ROUTER GENERATOR
 pub fn create_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin("https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap())
-        .allow_origin("https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap())
+        .allow_origin([
+            "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
+            "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
+        ])
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
