@@ -14,7 +14,7 @@ Aplikasi frontend (React/TypeScript) bertanggung jawab untuk dua fungsi utama: m
 ### 2. Pengambilan Data Dataset (REST API)
 - **Koneksi HTTP:** Menggunakan pustaka *fetch* bawaan peramban atau Axios, frontend melakukan *request* HTTP `GET` ke REST API backend di `http://127.0.0.1:8081/api/records`.
 - **Fungsi:** Berguna untuk memuat dan menampilkan daftar ketersediaan file CSV dataset (seperti dari folder Chapman, PTB-XL, atau data simulasi Prosim) pada menu navigasi (sidebar/dropdown) di aplikasi React.
-- **CORS Terintegrasi:** REST API sisi server telah dikonfigurasi untuk mengizinkan *Cross-Origin Resource Sharing (CORS)* untuk domain produksi (`https://ecgrhythmia.cloud`, `https://www.ecgrhythmia.cloud`) serta lingkungan pengembangan lokal (`localhost:5173`, `localhost:3000`, `127.0.0.1:5173`, `127.0.0.1:3000`), sehingga *request* langsung dari peramban (*browser*) tidak akan diblokir.
+- **CORS Terintegrasi:** REST API sisi server telah dikonfigurasi untuk mengizinkan *Cross-Origin Resource Sharing (CORS)* untuk domain produksi (`https://ecgrhythmia.cloud`, `https://www.ecgrhythmia.cloud`) dengan metode (`GET`, `POST`, `PUT`, `DELETE`, `OPTIONS`) dan header (`Content-Type`, `Authorization`).
 
 ---
 
