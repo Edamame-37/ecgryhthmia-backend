@@ -70,6 +70,7 @@ pub fn start_pacer(clients: ClientList) -> UnboundedSender<DevicePayload> {
                     r#type: "live_data".to_string(),
                     measurement_id: Some(device_data.message_id.clone()),
                     device_id: Some(device_data.device_id.clone()),
+                    session_id: Some(device_data.session_id.clone()),
                     timestamp: Some(device_data.created_at.clone()),
                     sha256_checksum: Some("bypass".to_string()),
                     data_payload: Some(payload),

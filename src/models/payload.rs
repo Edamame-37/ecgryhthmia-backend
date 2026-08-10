@@ -45,6 +45,9 @@ pub struct ServerMessage {
     pub device_id: Option<String>,
     
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     
     #[serde(skip_serializing_if = "Option::is_none")]

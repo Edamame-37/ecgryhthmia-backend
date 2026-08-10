@@ -1193,7 +1193,6 @@ pub async fn add_device_handler(
         }
     }
     
-    let pacer_tx = state.pacer_tx.clone();
     let db_tx = state.db_tx.clone();
     
     let client = crate::network::mqtt_listener::start_mqtt_listener(
@@ -1204,7 +1203,6 @@ pub async fn add_device_handler(
         &req.mqtt_password,
         move |payload_str| {
             if let Ok(device_payload) = serde_json::from_str::<crate::models::device::DevicePayload>(&payload_str) {
-                let _ = pacer_tx.send(device_payload.clone());
                 let _ = db_tx.send(device_payload);
             }
         }
@@ -1249,7 +1247,6 @@ pub async fn edit_device_handler(
         }
     }
 
-    let pacer_tx = state.pacer_tx.clone();
     let db_tx = state.db_tx.clone();
     
     let client = crate::network::mqtt_listener::start_mqtt_listener(
@@ -1260,7 +1257,6 @@ pub async fn edit_device_handler(
         &req.mqtt_password,
         move |payload_str| {
             if let Ok(device_payload) = serde_json::from_str::<crate::models::device::DevicePayload>(&payload_str) {
-                let _ = pacer_tx.send(device_payload.clone());
                 let _ = db_tx.send(device_payload);
             }
         }

@@ -137,7 +137,7 @@ pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str
     Ok(())
 }
 
-pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
+pub fn start_db_worker(pool: DbPool, pacer_tx: UnboundedSender<DevicePayload>) -> UnboundedSender<DevicePayload> {
     let (tx, mut rx) = unbounded_channel::<DevicePayload>();
 
     tokio::spawn(async move {
@@ -145,7 +145,7 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
         let mut device_map: HashMap<String, String> = HashMap::new();
         let mut session_map: HashMap<String, String> = HashMap::new();
 
-        while let Some(payload) = rx.recv().await {
+        while let Some(mut payload) = rx.recv().await {
             let conn = match pool.get() {
                 Ok(c) => c,
                 Err(e) => {
@@ -207,6 +207,9 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
                 new_id
             };
 
+            // Update session_id in payload to use database internal ID (ses_...)
+            payload.session_id = ses_id.clone();
+
             // 3. Tentukan path file berdasarkan internal session_id
             let file_path = format!("records/{}.jsonl", ses_id);
 
@@ -238,6 +241,9 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
                 error!("[Database] Gagal menulis baris ke file {}: {}", file_path, e);
                 continue;
             }
+
+            // 5. Teruskan payload yang sudah diperkaya dengan internal session_id ke Pacer
+            let _ = pacer_tx.send(payload);
         }
     });
 

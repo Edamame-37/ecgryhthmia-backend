@@ -37,7 +37,7 @@ async fn main() {
     let pacer_tx = network::pacer::start_pacer(clients.clone());
 
     // 6. Jalankan Background Database Worker untuk menulis data asinkron
-    let db_tx = db::sqlite::start_db_worker(pool.clone());
+    let db_tx = db::sqlite::start_db_worker(pool.clone(), pacer_tx.clone());
 
     // 7. Load Devices and start MQTT Listeners dynamically
     let mqtt_clients = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -57,7 +57,6 @@ async fn main() {
                 }) {
                     for device in device_iter {
                         if let Ok((name, broker, port, topic, username, password)) = device {
-                            let pacer_tx_clone = pacer_tx.clone();
                             let db_tx_clone = db_tx.clone();
                             
                             let client = network::mqtt_listener::start_mqtt_listener(
@@ -69,7 +68,6 @@ async fn main() {
                                 move |payload_str| {
                                     match serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
                                         Ok(device_payload) => {
-                                            let _ = pacer_tx_clone.send(device_payload.clone());
                                             let _ = db_tx_clone.send(device_payload);
                                         }
                                         Err(e) => {

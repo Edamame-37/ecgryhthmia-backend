@@ -114,7 +114,8 @@ async fn test_db_worker_session_writing() {
     }
 
     // Jalankan Db Worker asinkron
-    let db_tx = sqlite::start_db_worker(pool.clone());
+    let (pacer_tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let db_tx = sqlite::start_db_worker(pool.clone(), pacer_tx);
 
     // Kirim Payload dummy
     let payload = DevicePayload {
