@@ -141,6 +141,9 @@ pub struct AdminUser {
     pub role: String,
     pub status: String,
     pub registered_at: String,
+    pub connected_doctor_id: Option<String>,
+    pub connected_device_id: Option<String>,
+    pub profile_photo: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -152,6 +155,7 @@ pub struct PatientRecord {
     pub gender: String,
     pub primary_doctor_id: Option<String>,
     pub profile_photo: Option<String>,
+    pub device_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -223,8 +227,21 @@ pub struct AuthResponse {
 
 #[derive(Deserialize)]
 pub struct ConfirmationRequest {
+    pub time_interval: String,
     pub confirmation: i32,
     pub doc_classification: String,
+}
+
+#[derive(Deserialize)]
+pub struct FrameRequest {
+    pub id: String,
+    pub time_interval: String,
+    pub session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FrameSessionRequest {
+    pub session_id: String,
 }
 
 #[derive(Serialize)]
@@ -322,6 +339,44 @@ async fn get_admin_users_handler(
     Json(users)
 }
 
+async fn impersonate_handler(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    AxumPath(target_id): AxumPath<String>,
+) -> impl IntoResponse {
+    let conn = match state.pool.get() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthResponse { success: false, message: "Database Error".into(), user_id: None, role: None, token: None })),
+    };
+    
+    let query = "
+        SELECT a.id, a.role 
+        FROM accounts a
+        LEFT JOIN patients p ON p.account_id = a.id
+        LEFT JOIN doctors d ON d.account_id = a.id
+        WHERE p.id = ?1 OR d.id = ?1
+    ";
+    
+    match conn.query_row(query, rusqlite::params![target_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        Ok((account_id, role)) => {
+            let token = create_jwt(&account_id, &role, &state.jwt_secret);
+            let res = AuthResponse {
+                success: true,
+                message: "Impersonation successful".into(),
+                user_id: Some(target_id),
+                role: Some(role),
+                token: Some(token),
+            };
+            (StatusCode::OK, Json(res))
+        },
+        Err(_) => {
+            (StatusCode::NOT_FOUND, Json(AuthResponse { success: false, message: "User not found".into(), user_id: None, role: None, token: None }))
+        }
+    }
+}
+
 async fn get_patients_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -403,6 +458,81 @@ async fn update_patient_profile_handler(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ConnectPatientRequest {
+    pub doctor_id: String,
+}
+
+async fn connect_patient_handler(
+    State(state): State<AppState>,
+    AxumPath(patient_id): AxumPath<String>,
+    Json(req): Json<ConnectPatientRequest>,
+) -> impl IntoResponse {
+    if let Ok(conn) = state.pool.get() {
+        let res = conn.execute(
+            "UPDATE patients SET primary_doctor_id = ?1 WHERE id = ?2",
+            rusqlite::params![req.doctor_id, patient_id],
+        );
+        match res {
+            Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()}))),
+        }
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": "Database error"})))
+    }
+}
+
+async fn disconnect_patient_handler(
+    State(state): State<AppState>,
+    AxumPath(patient_id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Ok(conn) = state.pool.get() {
+        let res = conn.execute(
+            "UPDATE patients SET primary_doctor_id = NULL WHERE id = ?1",
+            rusqlite::params![patient_id],
+        );
+        match res {
+            Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()}))),
+        }
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": "Database error"})))
+    }
+}
+
+async fn get_doctor_patients_handler(
+    State(state): State<AppState>,
+    AxumPath(doctor_id): AxumPath<String>,
+) -> impl IntoResponse {
+    if let Ok(conn) = state.pool.get() {
+        let mut stmt = conn.prepare("
+            SELECT p.id, p.first_name, p.last_name, a.profile_photo 
+            FROM patients p 
+            LEFT JOIN accounts a ON p.account_id = a.id 
+            WHERE p.primary_doctor_id = ?1
+        ").unwrap();
+        let patients_iter = stmt.query_map(rusqlite::params![doctor_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": format!("{} {}", row.get::<_, String>(1).unwrap_or_default(), row.get::<_, String>(2).unwrap_or_default()).trim().to_string(),
+                "profile_photo": row.get::<_, Option<String>>(3)?,
+            }))
+        });
+        
+        let mut patients_list = Vec::new();
+        if let Ok(iter) = patients_iter {
+            for p in iter {
+                if let Ok(p) = p {
+                    patients_list.push(p);
+                }
+            }
+        }
+        (StatusCode::OK, Json(serde_json::json!(patients_list)))
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!([])))
+    }
+}
+
 async fn get_record_handler(
     AxumPath(session_id): AxumPath<String>,
 ) -> impl IntoResponse {
@@ -425,9 +555,10 @@ async fn assign_device_handler(
 ) -> impl IntoResponse {
     if let Ok(conn) = state.pool.get() {
         if let Some(pid) = req.patient_id {
-            let _ = conn.execute("UPDATE devices SET assigned_to = ?1 WHERE name = ?2 OR id = ?2", rusqlite::params![pid, device_id]);
+            let _ = conn.execute("UPDATE patients SET device_id = NULL WHERE device_id = ?1", rusqlite::params![device_id]);
+            let _ = conn.execute("UPDATE patients SET device_id = ?1 WHERE id = ?2", rusqlite::params![device_id, pid]);
         } else {
-            let _ = conn.execute("UPDATE devices SET assigned_to = NULL WHERE name = ?1 OR id = ?1", rusqlite::params![device_id]);
+            let _ = conn.execute("UPDATE patients SET device_id = NULL WHERE device_id = ?1", rusqlite::params![device_id]);
         }
         (StatusCode::OK, Json(serde_json::json!({"success": true})))
     } else {
@@ -484,6 +615,33 @@ async fn session_confirmation_handler(
     Json(req): Json<ConfirmationRequest>,
 ) -> impl IntoResponse {
     match handle_confirmation(&session_id, req, &state.pool) {
+        Ok(res) => (StatusCode::OK, Json(res)),
+        Err(msg) => {
+            let res = ConfirmationResponse { success: false, message: msg };
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(res))
+        }
+    }
+}
+
+async fn frame_preregister_handler(
+    State(state): State<AppState>,
+    Json(req): Json<FrameRequest>,
+) -> impl IntoResponse {
+    match handle_frame_preregister(req, &state.pool) {
+        Ok(res) => (StatusCode::OK, Json(res)),
+        Err(msg) => {
+            let res = ConfirmationResponse { success: false, message: msg };
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(res))
+        }
+    }
+}
+
+async fn frame_session_update_handler(
+    State(state): State<AppState>,
+    AxumPath(frame_id): AxumPath<String>,
+    Json(req): Json<FrameSessionRequest>,
+) -> impl IntoResponse {
+    match handle_frame_session_update(&frame_id, req, &state.pool) {
         Ok(res) => (StatusCode::OK, Json(res)),
         Err(msg) => {
             let res = ConfirmationResponse { success: false, message: msg };
@@ -589,8 +747,8 @@ fn handle_confirmation(session_id: &str, req: ConfirmationRequest, pool: &DbPool
     let conn = pool.get().map_err(|e| e.to_string())?;
     
     let result = conn.execute(
-        "UPDATE sessions SET confirmation = ?1, doc_classification = ?2 WHERE id = ?3",
-        params![req.confirmation, req.doc_classification, session_id]
+        "UPDATE frame_records SET confirmation = ?1, doc_classification = ?2 WHERE session_id = ?3 AND time_interval = ?4",
+        params![req.confirmation, req.doc_classification, session_id, req.time_interval]
     );
 
     match result {
@@ -598,13 +756,47 @@ fn handle_confirmation(session_id: &str, req: ConfirmationRequest, pool: &DbPool
             if rows_affected > 0 {
                 Ok(ConfirmationResponse {
                     success: true,
-                    message: "Konfirmasi berhasil disimpan".to_string(),
+                    message: "Konfirmasi berhasil diupdate".to_string(),
                 })
             } else {
-                Err("Session ID tidak ditemukan".to_string())
+                Err("Gagal menyimpan konfirmasi frame (frame record tidak ditemukan)".to_string())
             }
         },
         Err(e) => Err(format!("Gagal menyimpan konfirmasi: {}", e))
+    }
+}
+
+fn handle_frame_preregister(req: FrameRequest, pool: &DbPool) -> Result<ConfirmationResponse, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    
+    let result = conn.execute(
+        "INSERT INTO frame_records (id, session_id, time_interval) VALUES (?1, ?2, ?3)",
+        params![req.id, req.session_id, req.time_interval]
+    );
+
+    match result {
+        Ok(_) => Ok(ConfirmationResponse { success: true, message: "Frame pre-registered".to_string() }),
+        Err(e) => Err(format!("Gagal insert frame: {}", e))
+    }
+}
+
+fn handle_frame_session_update(frame_id: &str, req: FrameSessionRequest, pool: &DbPool) -> Result<ConfirmationResponse, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    
+    let result = conn.execute(
+        "UPDATE frame_records SET session_id = ?1 WHERE id = ?2",
+        params![req.session_id, frame_id]
+    );
+
+    match result {
+        Ok(rows_affected) => {
+            if rows_affected > 0 {
+                Ok(ConfirmationResponse { success: true, message: "Frame session updated".to_string() })
+            } else {
+                Err("Frame ID tidak ditemukan".to_string())
+            }
+        },
+        Err(e) => Err(format!("Gagal update session: {}", e))
     }
 }
 
@@ -678,7 +870,7 @@ fn get_sessions_from_db(filter_patient_id: Option<String>, pool: &DbPool) -> Vec
 fn get_devices_from_db(pool: &DbPool) -> Vec<DeviceRecord> {
     let mut devices = Vec::new();
     if let Ok(conn) = pool.get() {
-        if let Ok(mut stmt) = conn.prepare("SELECT id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, assigned_to FROM devices") {
+        if let Ok(mut stmt) = conn.prepare("SELECT d.id, d.name, d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, p.id as assigned_to FROM devices d LEFT JOIN patients p ON d.id = p.device_id") {
             if let Ok(device_iter) = stmt.query_map([], |row| {
                 Ok(DeviceRecord {
                     id: row.get(0)?,
@@ -741,11 +933,11 @@ fn get_admin_users(pool: &DbPool) -> Vec<AdminUser> {
     let mut users = Vec::new();
     if let Ok(conn) = pool.get() {
         let query = "
-            SELECT p.id, p.first_name || ' ' || p.last_name, a.role, IFNULL(a.status, 'Offline'), a.created_at
+            SELECT p.id, p.first_name || ' ' || p.last_name, a.role, IFNULL(a.status, 'Offline'), a.created_at, p.primary_doctor_id, p.device_id, a.profile_photo
             FROM patients p
             JOIN accounts a ON p.account_id = a.id
             UNION ALL
-            SELECT d.id, d.first_name || ' ' || d.last_name, a.role, IFNULL(a.status, 'Offline'), a.created_at
+            SELECT d.id, d.first_name || ' ' || d.last_name, a.role, IFNULL(a.status, 'Offline'), a.created_at, NULL, NULL, a.profile_photo
             FROM doctors d
             JOIN accounts a ON d.account_id = a.id
             ORDER BY created_at DESC
@@ -758,6 +950,9 @@ fn get_admin_users(pool: &DbPool) -> Vec<AdminUser> {
                     role: row.get(2)?,
                     status: row.get(3)?,
                     registered_at: row.get(4)?,
+                    connected_doctor_id: row.get(5)?,
+                    connected_device_id: row.get(6)?,
+                    profile_photo: row.get(7)?,
                 })
             }) {
                 for user in user_iter {
@@ -774,7 +969,7 @@ fn get_admin_users(pool: &DbPool) -> Vec<AdminUser> {
 fn get_patient_profile(patient_id: String, pool: &DbPool) -> Option<PatientProfileResponse> {
     if let Ok(conn) = pool.get() {
         let mut stmt = conn.prepare("
-            SELECT p.id, p.first_name, p.last_name, p.date_of_birth, p.gender, p.primary_doctor_id, a.profile_photo
+            SELECT p.id, p.first_name, p.last_name, p.date_of_birth, p.gender, p.primary_doctor_id, a.profile_photo, p.device_id
             FROM patients p
             LEFT JOIN accounts a ON p.account_id = a.id
             WHERE p.id = ?1
@@ -789,6 +984,7 @@ fn get_patient_profile(patient_id: String, pool: &DbPool) -> Option<PatientProfi
                 gender: row.get(4)?,
                 primary_doctor_id: row.get(5)?,
                 profile_photo: row.get(6)?,
+                device_id: row.get(7)?,
             })
         }).ok()?;
         
@@ -1077,16 +1273,22 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/devices", get(get_devices_handler))
         .route("/api/admin/stats", get(get_admin_stats_handler))
         .route("/api/admin/users", get(get_admin_users_handler))
+        .route("/api/admin/impersonate/:target_id", post(impersonate_handler))
         .route("/api/admin/devices", get(get_devices_handler).post(add_device_handler))
         .route("/api/admin/devices/:id", put(edit_device_handler))
         .route("/api/patients", get(get_patients_handler))
         .route("/api/patients/:patient_id/sessions", get(get_patient_sessions_handler))
         .route("/api/patients/:patient_id", get(get_patient_profile_handler).put(update_patient_profile_handler))
+        .route("/api/patients/:patient_id/connect", post(connect_patient_handler))
+        .route("/api/patients/:patient_id/disconnect", post(disconnect_patient_handler))
+        .route("/api/doctors/:doctor_id/patients", get(get_doctor_patients_handler))
         .route("/api/doctors/:doctor_id", get(get_doctor_profile_handler).put(update_doctor_profile_handler))
         .route("/api/records/:session_id", get(get_record_handler))
         .route("/api/devices/:device_id/command", post(device_command_handler))
         .route("/api/devices/:device_id/assign", post(assign_device_handler))
         .route("/api/sessions/:session_id/confirmation", post(session_confirmation_handler))
+        .route("/api/frames", post(frame_preregister_handler))
+        .route("/api/frames/:id/session", put(frame_session_update_handler))
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
         .layer(cors)
         .with_state(state)
