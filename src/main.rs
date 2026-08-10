@@ -44,7 +44,7 @@ async fn main() {
     
     {
         if let Ok(conn) = pool.get() {
-            if let Ok(mut stmt) = conn.prepare("SELECT name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices") {
+            if let Ok(mut stmt) = conn.prepare("SELECT name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices WHERE mqtt_broker IS NOT NULL AND mqtt_port IS NOT NULL") {
                 if let Ok(device_iter) = stmt.query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -67,9 +67,18 @@ async fn main() {
                                 &username,
                                 &password,
                                 move |payload_str| {
-                                    if let Ok(device_payload) = serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
-                                        let _ = pacer_tx_clone.send(device_payload.clone());
-                                        let _ = db_tx_clone.send(device_payload);
+                                    match serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
+                                        Ok(device_payload) => {
+                                            let _ = pacer_tx_clone.send(device_payload.clone());
+                                            let _ = db_tx_clone.send(device_payload);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Gagal mem-parsing payload EKG dari perangkat: {}. Payload: {}",
+                                                e,
+                                                payload_str
+                                            );
+                                        }
                                     }
                                 }
                             );
