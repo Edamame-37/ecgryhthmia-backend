@@ -66,10 +66,11 @@ pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str
         CREATE TABLE IF NOT EXISTS devices (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            mac TEXT,
-            battery INTEGER,
-            status TEXT,
-            assigned_to TEXT
+            mqtt_broker TEXT,
+            mqtt_port INTEGER,
+            mqtt_topic TEXT,
+            mqtt_username TEXT,
+            mqtt_password TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -109,9 +110,20 @@ pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str
     let _ = conn.execute("ALTER TABLE devices DROP COLUMN battery;", params![]);
     let _ = conn.execute("ALTER TABLE devices DROP COLUMN status;", params![]);
     let _ = conn.execute("ALTER TABLE devices DROP COLUMN assigned_to;", params![]);
+
+    // Migrasi kolom baru untuk detail koneksi broker
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_broker TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_port INTEGER;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_topic TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_username TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_password TEXT;", params![]);
     
     let _ = conn.execute(
-        "INSERT OR IGNORE INTO devices (id, name) VALUES ('dev_001', 'device01');",
+        "INSERT OR IGNORE INTO devices (id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password) VALUES ('dev_001', 'device01', '93d81a02c1f743b6ab4ea22d7ad9c3e0.s1.eu.hivemq.cloud', 8883, 'ecgrhythmia/device01', 'ecg-undip', 'undipjaya');",
+        params![]
+    );
+    let _ = conn.execute(
+        "UPDATE devices SET mqtt_broker = '93d81a02c1f743b6ab4ea22d7ad9c3e0.s1.eu.hivemq.cloud', mqtt_port = 8883, mqtt_topic = 'ecgrhythmia/device01', mqtt_username = 'ecg-undip', mqtt_password = 'undipjaya' WHERE name = 'device01';",
         params![]
     );
 
