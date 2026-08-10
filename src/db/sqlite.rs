@@ -247,3 +247,55 @@ pub fn generate_custom_id(conn: &Connection, table: &str, prefix: &str) -> Strin
     }
     format!("{}000000000001", prefix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_in_memory_db() -> rusqlite::Connection {
+        rusqlite::Connection::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn test_migrations_and_seeding() {
+        let conn = init_in_memory_db();
+        let res = run_migrations(&conn, "admin@test.com", "password123");
+        assert!(res.is_ok());
+
+        // Check if admin account was inserted
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM accounts WHERE email = 'admin@test.com'",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(count, 1);
+
+        // Check if default device was inserted
+        let dev_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM devices WHERE name = 'device01'",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(dev_count, 1);
+    }
+
+    #[test]
+    fn test_id_generation() {
+        let conn = init_in_memory_db();
+        run_migrations(&conn, "admin@test.com", "password123").unwrap();
+
+        // Initially no sessions, should generate prefix + 000000000001
+        let id1 = generate_custom_id(&conn, "sessions", "ses");
+        assert_eq!(id1, "ses000000000001");
+
+        // Insert a session with this ID
+        conn.execute(
+            "INSERT INTO sessions (id, device_id, started_at, file_path) VALUES (?1, 'dev_001', '2026-08-10', 'test.jsonl')",
+            params![id1]
+        ).unwrap();
+
+        // Next ID should be ses000000000002
+        let id2 = generate_custom_id(&conn, "sessions", "ses");
+        assert_eq!(id2, "ses000000000002");
+    }
+}

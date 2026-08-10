@@ -16,8 +16,8 @@ use axum::{
     http::{request::Parts, StatusCode, Method, HeaderValue, header},
     response::IntoResponse,
 };
-use tower_http::cors::{CorsLayer, Any};
-use tracing::error;
+use tower_http::cors::CorsLayer;
+use tracing::{info, error};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -197,7 +197,7 @@ pub struct UpdatePatientProfileRequest {
     pub profile_photo: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct RegisterRequest {
     pub role: String,
     pub email: String,
@@ -209,14 +209,14 @@ pub struct RegisterRequest {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
     pub role: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AuthResponse {
     pub success: bool,
     pub message: String,
@@ -578,15 +578,17 @@ async fn device_command_handler(
     Json(cmd): Json<DeviceCommand>,
 ) -> impl IntoResponse {
     if cmd.command.to_uppercase() == "START" {
-        println!("Perekaman Dimulai");
+        info!(device_id = %device_id, "Perekaman Dimulai");
     } else if cmd.command.to_uppercase() == "STOP" {
-        println!("Perekaman Selesai");
+        info!(device_id = %device_id, "Perekaman Selesai");
         if let Ok(conn) = state.pool.get() {
             let now_str = chrono::Utc::now().to_rfc3339();
-            let _ = conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE sessions SET ended_at = ?1 WHERE ended_at IS NULL AND device_id = (SELECT id FROM devices WHERE name = ?2 OR id = ?2 LIMIT 1)",
                 rusqlite::params![now_str, device_id]
-            );
+            ) {
+                error!(error = %e, device_id = %device_id, "Gagal mengupdate ended_at untuk sesi perekaman");
+            }
         }
     }
 

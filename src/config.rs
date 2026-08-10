@@ -101,3 +101,40 @@ impl AppConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_load() {
+        std::env::set_var("HOST_IP", "127.0.0.9");
+        std::env::set_var("REST_PORT", "9999");
+        std::env::set_var("WS_PORT", "9998");
+        std::env::set_var("MQTT_BROKER", "broker.test");
+        std::env::set_var("MQTT_PORT", "1883");
+        std::env::set_var("MQTT_TOPIC", "test/topic");
+        std::env::set_var("MQTT_USERNAME", "testuser");
+        std::env::set_var("MQTT_PASSWORD", "testpass");
+        std::env::set_var("JWT_SECRET", "testsecret");
+        std::env::set_var("SQLITE_KEY", "testkey");
+        std::env::set_var("DB_PATH", "testdb.db");
+        std::env::set_var("DEFAULT_ADMIN_EMAIL", "admin@test.com");
+        std::env::set_var("DEFAULT_ADMIN_PASSWORD", "admin123");
+
+        let config = AppConfig::load();
+        assert_eq!(config.host_ip, "127.0.0.9");
+        assert_eq!(config.rest_port, "9999");
+        assert_eq!(config.ws_port, "9998");
+        assert_eq!(config.mqtt_broker, "broker.test");
+        assert_eq!(config.mqtt_port, 1883);
+        assert_eq!(config.mqtt_topic, "test/topic");
+        assert_eq!(config.mqtt_username, "testuser");
+        assert_eq!(config.mqtt_password, "testpass");
+        assert_eq!(config.jwt_secret, "testsecret");
+        assert_eq!(config.sqlite_key, "testkey");
+        assert_eq!(config.db_path, "testdb.db");
+        assert_eq!(config.default_admin_email, "admin@test.com");
+        assert_eq!(config.default_admin_password, "admin123");
+    }
+}

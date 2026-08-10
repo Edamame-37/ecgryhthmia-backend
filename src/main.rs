@@ -1,9 +1,4 @@
-mod models;
-mod data;
-mod network;
-mod api;
-mod db;
-mod config;
+use ecg_backend::{models, network, api, db, config};
 
 use tracing::{info, error, Level};
 use tracing_subscriber::FmtSubscriber;

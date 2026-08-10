@@ -46,3 +46,39 @@ pub fn read_ecg_data(file_path: &str) -> Result<RawECGData, Box<dyn Error>> {
 
     Ok(RawECGData { time, ch1, ch2, ch3 })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_read_ecg_data_valid() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_ecg.csv");
+        let file_path_str = file_path.to_str().unwrap();
+
+        let mut file = File::create(file_path_str).unwrap();
+        writeln!(file, "time,ch1,ch2,ch3").unwrap();
+        writeln!(file, "0.0,1.2,2.3,3.4").unwrap();
+        writeln!(file, "0.04,1.5,,3.8").unwrap(); // missing value
+        writeln!(file, "0.08,invalid,2.1,3.9").unwrap(); // invalid value
+        drop(file);
+
+        let result = read_ecg_data(file_path_str);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.time.len(), 3);
+        assert_eq!(data.time[0], 0.0);
+        assert_eq!(data.ch1[0], 1.2);
+        assert_eq!(data.ch2[0], 2.3);
+        assert_eq!(data.ch3[0], 3.4);
+
+        // check parsed fallbacks
+        assert_eq!(data.ch2[1], 0.0);
+        assert_eq!(data.ch1[2], 0.0);
+
+        let _ = std::fs::remove_file(file_path_str);
+    }
+}
