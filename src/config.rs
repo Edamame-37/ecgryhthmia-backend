@@ -1,6 +1,7 @@
 use dotenvy::dotenv;
 use std::env;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub host_ip: String,
@@ -14,6 +15,8 @@ pub struct AppConfig {
     pub jwt_secret: String,
     pub sqlite_key: String,
     pub db_path: String,
+    pub default_admin_email: String,
+    pub default_admin_password: String,
 }
 
 impl AppConfig {
@@ -75,6 +78,12 @@ impl AppConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "database.db".to_string());
 
+        let default_admin_email = env::var("DEFAULT_ADMIN_EMAIL")
+            .expect("[Config] ERROR: DEFAULT_ADMIN_EMAIL belum diset di .env!");
+            
+        let default_admin_password = env::var("DEFAULT_ADMIN_PASSWORD")
+            .expect("[Config] ERROR: DEFAULT_ADMIN_PASSWORD belum diset di .env!");
+
         AppConfig {
             host_ip,
             rest_port,
@@ -87,6 +96,8 @@ impl AppConfig {
             jwt_secret,
             sqlite_key,
             db_path,
+            default_admin_email,
+            default_admin_password,
         }
     }
 }

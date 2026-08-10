@@ -31,7 +31,7 @@ pub fn create_pool(db_path: &str, db_key: &str) -> DbPool {
         .expect("Gagal membuat connection pool SQLite")
 }
 
-pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str) -> Result<(), rusqlite::Error> {
     let create_tables_query = "
         CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY,
@@ -79,28 +79,48 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             started_at TEXT NOT NULL,
             ended_at TEXT,
             file_path TEXT NOT NULL,
-            confirmation INTEGER,
-            doc_classification TEXT,
             FOREIGN KEY(device_id) REFERENCES devices(id),
             FOREIGN KEY(patient_id) REFERENCES patients(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS frame_records (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            time_interval TEXT NOT NULL,
+            confirmation INTEGER,
+            doc_classification TEXT,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
         );
     ";
 
     conn.execute_batch(create_tables_query)?;
 
-    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN confirmation INTEGER;", params![]);
-    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN doc_classification TEXT;", params![]);
-    
-    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mac TEXT;", params![]);
-    let _ = conn.execute("ALTER TABLE devices ADD COLUMN battery INTEGER;", params![]);
-    let _ = conn.execute("ALTER TABLE devices ADD COLUMN status TEXT;", params![]);
-    let _ = conn.execute("ALTER TABLE devices ADD COLUMN assigned_to TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE sessions DROP COLUMN confirmation;", params![]);
+    let _ = conn.execute("ALTER TABLE sessions DROP COLUMN doc_classification;", params![]);
     let _ = conn.execute("ALTER TABLE accounts ADD COLUMN status TEXT DEFAULT 'Offline';", params![]);
     
+    // Migrasi device_id ke patients
+    let _ = conn.execute("ALTER TABLE patients ADD COLUMN device_id TEXT;", params![]);
+    // Update existing assignments from devices table before dropping it!
+    let _ = conn.execute("UPDATE patients SET device_id = (SELECT id FROM devices WHERE assigned_to = patients.id)", params![]);
+    
+    // Drop unused columns
+    let _ = conn.execute("ALTER TABLE devices DROP COLUMN mac;", params![]);
+    let _ = conn.execute("ALTER TABLE devices DROP COLUMN battery;", params![]);
+    let _ = conn.execute("ALTER TABLE devices DROP COLUMN status;", params![]);
+    let _ = conn.execute("ALTER TABLE devices DROP COLUMN assigned_to;", params![]);
+    
     let _ = conn.execute(
-        "INSERT OR IGNORE INTO devices (id, name, mac, battery, status, assigned_to) VALUES ('dev_001', 'device01', '00:1A:2B:3C:4D:5E', 100, 'Active', 'pat000000000001');",
+        "INSERT OR IGNORE INTO devices (id, name) VALUES ('dev_001', 'device01');",
         params![]
     );
+
+    if let Ok(admin_hash) = bcrypt::hash(admin_password, bcrypt::DEFAULT_COST) {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO accounts (id, email, password_hash, role, created_at, status) VALUES ('acc_admin', ?1, ?2, 'admin', datetime('now'), 'Offline');",
+            params![admin_email, admin_hash]
+        );
+    }
 
     Ok(())
 }
@@ -139,7 +159,7 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
                     Err(_) => {
                         let new_id = generate_custom_id(&conn, "devices", "dev");
                         if let Err(e) = conn.execute(
-                            "INSERT INTO devices (id, name, mac, battery, status, assigned_to) VALUES (?1, ?2, 'Unknown', 100, 'Active', 'Unassigned')",
+                            "INSERT INTO devices (id, name) VALUES (?1, ?2)",
                             params![new_id, payload.device_id]
                         ) {
                             error!("[Database] Gagal INSERT device: {}", e);
@@ -160,7 +180,7 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
                 
                 let initial_file_path = format!("records/{}.jsonl", new_id);
                 let patient_id: Option<String> = conn.query_row(
-                    "SELECT assigned_to FROM devices WHERE id = ?1 AND assigned_to != 'Unassigned'",
+                    "SELECT id FROM patients WHERE device_id = ?1",
                     params![dev_id],
                     |row| row.get(0)
                 ).ok();
@@ -213,10 +233,14 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
 }
 
 pub fn generate_custom_id(conn: &Connection, table: &str, prefix: &str) -> String {
-    let query = format!("SELECT id FROM {} ORDER BY id DESC LIMIT 1", table);
+    let expected_len = prefix.len() + 12;
+    let query = format!(
+        "SELECT id FROM {} WHERE id LIKE '{}%' AND LENGTH(id) = {} ORDER BY id DESC LIMIT 1", 
+        table, prefix, expected_len
+    );
     let last_id: String = conn.query_row(&query, [], |row| row.get(0)).unwrap_or_else(|_| format!("{}000000000000", prefix));
     
-    if last_id.len() > prefix.len() {
+    if last_id.starts_with(prefix) && last_id.len() == expected_len {
         if let Ok(num) = last_id[prefix.len()..].parse::<i64>() {
             return format!("{}{:012}", prefix, num + 1);
         }
