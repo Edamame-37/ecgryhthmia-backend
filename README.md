@@ -100,23 +100,35 @@ Aplikasi ini dilengkapi dengan pengujian unit dan pengujian integrasi yang kompr
    - **ECG Pacer Integration:** Memverifikasi pembagian data (slicing) signal EKG dan broadcast via WebSocket klien.
 
 #### B. Menjalankan Pengujian Manual
-Untuk menjalankan seluruh unit test dan integration test secara manual di Windows, jalankan perintah berikut pada terminal PowerShell:
-```powershell
-$env:OPENSSL_DIR="d:\Project\ecgrhythmia-backend\openssl-custom"; $env:OPENSSL_STATIC="1"; cargo test
-```
+- **Di Windows (PowerShell):**
+  ```powershell
+  $env:OPENSSL_DIR="d:\Project\ecgrhythmia-backend\openssl-custom"; $env:OPENSSL_STATIC="1"; cargo test
+  ```
+- **Di Linux (Terminal):**
+  ```bash
+  cargo test
+  ```
 
 #### C. Pengujian Otomatis Sebelum Build & Deploy (Sangat Direkomendasikan)
-Untuk menjamin tidak ada kode rusak yang masuk ke tahap kompilasi rilis, kami menyediakan skrip otomatisasi **`test_and_build.ps1`**. Skrip ini akan melakukan hal berikut secara berurutan:
+Untuk menjamin tidak ada kode rusak yang masuk ke tahap kompilasi rilis, kami menyediakan skrip otomatisasi **`test_and_build.ps1`** (Windows) dan **`test_and_build.sh`** (Linux). Skrip ini akan melakukan hal berikut secara berurutan:
 1. Menjalankan seluruh pengujian unit & integrasi.
 2. Menganalisis log hasil uji dan **melampirkan laporan jumlah test yang berhasil (passed) dan gagal (failed)** pada konsol.
 3. **Jika ada pengujian yang gagal (atau terjadi error kompilasi):** Skrip akan langsung menghentikan proses (*abort*) untuk mencegah pembangunan biner yang rusak.
 4. **Jika seluruh pengujian lolos:** Skrip melanjutkan dengan mengompilasi biner produksi teroptimasi menggunakan `cargo build --release`.
 
-Jalankan skrip ini sebelum melakukan deploy:
-```powershell
-.\test_and_build.ps1
-```
-Output biner produksi (.exe) yang siap dideploy akan tersedia di direktori `target\release\ecg-backend.exe`.
+##### Cara Menjalankan:
+- **Di Windows (PowerShell):**
+  ```powershell
+  .\test_and_build.ps1
+  ```
+  Output biner produksi (`.exe`) akan tersedia di `target\release\ecg-backend.exe`.
+
+- **Di Linux (Terminal):**
+  ```bash
+  chmod +x test_and_build.sh
+  ./test_and_build.sh
+  ```
+  Output biner produksi akan tersedia di `target/release/ecg-backend`.
 
 ---
 
