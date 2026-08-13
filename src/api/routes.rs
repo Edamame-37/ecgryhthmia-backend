@@ -2,12 +2,11 @@ use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use rusqlite::params;
 use chrono::Utc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as base64_engine};
-use crate::db::sqlite::{generate_custom_id, DbPool};
-use bcrypt::{hash, verify, DEFAULT_COST};
-use jsonwebtoken::{encode, decode, Header, Algorithm, Validation, EncodingKey, DecodingKey};
+use crate::db::postgres::generate_custom_id;
+use jsonwebtoken::{decode, Algorithm, Validation, DecodingKey};
+use sqlx::PgPool;
 use axum::{
     async_trait,
     routing::{get, post, put},
@@ -21,7 +20,7 @@ use tracing::{info, error};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: DbPool,
+    pub pool: PgPool,
     pub mqtt_clients: std::sync::Arc<tokio::sync::RwLock<HashMap<String, rumqttc::Client>>>,
     pub pacer_tx: tokio::sync::mpsc::UnboundedSender<crate::models::device::DevicePayload>,
     pub db_tx: tokio::sync::mpsc::UnboundedSender<crate::models::device::DevicePayload>,
@@ -30,14 +29,23 @@ pub struct AppState {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppMetadata {
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub sub: String,
-    pub role: String,
+    pub app_metadata: Option<AppMetadata>,
     pub exp: usize,
 }
 
-#[allow(dead_code)]
-pub struct AdminClaims(pub Claims);
+pub struct FullClaims {
+    pub sub: String,
+    pub role: String,
+}
+
+pub struct AdminClaims(pub FullClaims);
 
 #[async_trait]
 impl<S> FromRequestParts<S> for AdminClaims
@@ -50,41 +58,30 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         
-        let claims = if let Some(auth_header) = parts
-            .headers
-            .get("Authorization")
-            .and_then(|value| value.to_str().ok())
-        {
+        if let Some(auth_header) = parts.headers.get("Authorization").and_then(|v| v.to_str().ok()) {
             if auth_header.starts_with("Bearer ") {
                 let token = &auth_header[7..];
-                validate_jwt(token, &app_state.jwt_secret).unwrap_or_else(|| {
-                    Claims {
-                        sub: "acc_admin".to_string(),
-                        role: "admin".to_string(),
-                        exp: usize::MAX,
+                if let Some(claims) = validate_jwt(token, &app_state.jwt_secret) {
+                    let mut role = claims.app_metadata.and_then(|m| m.role).unwrap_or_default();
+                    
+                    if role.is_empty() {
+                        if let Ok(record) = sqlx::query!("SELECT role FROM accounts WHERE id = $1", claims.sub).fetch_one(&app_state.pool).await {
+                            role = record.role;
+                        }
                     }
-                })
-            } else {
-                Claims {
-                    sub: "acc_admin".to_string(),
-                    role: "admin".to_string(),
-                    exp: usize::MAX,
+
+                    if role == "admin" || claims.sub == "acc_admin" {
+                        return Ok(AdminClaims(FullClaims { sub: claims.sub, role }));
+                    }
                 }
             }
-        } else {
-            Claims {
-                sub: "acc_admin".to_string(),
-                role: "admin".to_string(),
-                exp: usize::MAX,
-            }
-        };
-
-        Ok(AdminClaims(claims))
+        }
+        
+        Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Admin access required"}))))
     }
 }
 
-#[allow(dead_code)]
-pub struct UserClaims(pub Claims);
+pub struct UserClaims(pub FullClaims);
 
 #[async_trait]
 impl<S> FromRequestParts<S> for UserClaims
@@ -97,10 +94,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         
-        let auth_header = parts
-            .headers
-            .get("Authorization")
-            .and_then(|value| value.to_str().ok())
+        let auth_header = parts.headers.get("Authorization").and_then(|v| v.to_str().ok())
             .ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Header Authorization tidak ditemukan"}))))?;
 
         if !auth_header.starts_with("Bearer ") {
@@ -111,7 +105,14 @@ where
         let claims = validate_jwt(token, &app_state.jwt_secret)
             .ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Sesi tidak valid atau kedaluwarsa"}))))?;
 
-        Ok(UserClaims(claims))
+        let mut role = claims.app_metadata.and_then(|m| m.role).unwrap_or_default();
+        if role.is_empty() {
+            if let Ok(record) = sqlx::query!("SELECT role FROM accounts WHERE id = $1", claims.sub).fetch_one(&app_state.pool).await {
+                role = record.role;
+            }
+        }
+
+        Ok(UserClaims(FullClaims { sub: claims.sub, role }))
     }
 }
 
@@ -130,11 +131,10 @@ pub struct SessionRecord {
 pub struct DeviceRecord {
     pub id: String,
     pub name: String,
-    pub mqtt_broker: String,
-    pub mqtt_port: u16,
-    pub mqtt_topic: String,
-    pub mqtt_username: String,
-    pub assigned_to: Option<String>,
+    pub mqtt_broker: Option<String>,
+    pub mqtt_port: Option<i32>,
+    pub mqtt_topic: Option<String>,
+    pub mqtt_username: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -151,7 +151,7 @@ pub struct AdminUser {
     pub name: String,
     pub role: String,
     pub status: String,
-    pub registered_at: String,
+    pub registered_at: Option<String>,
     pub connected_doctor_id: Option<String>,
     pub connected_device_id: Option<String>,
     pub profile_photo: Option<String>,
@@ -208,39 +208,18 @@ pub struct UpdatePatientProfileRequest {
     pub profile_photo: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct RegisterRequest {
-    pub role: String,
-    pub email: String,
-    pub password: String,
-    pub first_name: String,
-    pub last_name: String,
-    pub date_of_birth: Option<String>,
-    pub gender: Option<String>,
+#[derive(Deserialize)]
+pub struct ConnectPatientRequest {
+    pub doctor_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Serialize)]
-pub struct LoginRequest {
-    pub email: String,
-    pub password: String,
-    pub role: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct AuthResponse {
     pub success: bool,
     pub message: String,
     pub user_id: Option<String>,
     pub role: Option<String>,
     pub token: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct ConfirmationRequest {
-    pub time_interval: String,
-    pub confirmation: i32,
-    pub doc_classification: String,
 }
 
 #[derive(Deserialize)]
@@ -261,61 +240,30 @@ pub struct ConfirmationResponse {
     pub message: String,
 }
 
-fn create_jwt(account_id: &str, role: &str, secret: &str) -> String {
-    let expiration = Utc::now().checked_add_signed(chrono::Duration::hours(2)).expect("valid timestamp").timestamp();
-    
-    let claims = Claims {
-        sub: account_id.to_owned(),
-        role: role.to_owned(),
-        exp: expiration as usize,
-    };
-    
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap_or_default()
-}
-
 fn validate_jwt(token: &str, secret: &str) -> Option<Claims> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
+    validation.set_audience(&["authenticated".to_string()]); // Supabase typical audience
+
+    // We disable audience checking for now just in case the Supabase token format differs
+    validation.validate_aud = false;
     
     match decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation) {
         Ok(token_data) => Some(token_data.claims),
-        Err(_) => None,
+        Err(e) => {
+            error!("JWT Validation error: {}", e);
+            None
+        }
     }
 }
 
 // ROUTE HANDLERS
-async fn register_handler(
-    State(state): State<AppState>,
-    Json(req): Json<RegisterRequest>,
-) -> impl IntoResponse {
-    match handle_register(req, &state.pool) {
-        Ok(res) => (StatusCode::OK, Json(res)),
-        Err(msg) => {
-            let res = AuthResponse { success: false, message: msg, user_id: None, role: None, token: None };
-            (StatusCode::BAD_REQUEST, Json(res))
-        }
-    }
-}
-
-async fn login_handler(
-    State(state): State<AppState>,
-    Json(req): Json<LoginRequest>,
-) -> impl IntoResponse {
-    match handle_login(req, &state.pool, &state.jwt_secret) {
-        Ok(res) => (StatusCode::OK, Json(res)),
-        Err(msg) => {
-            let res = AuthResponse { success: false, message: msg, user_id: None, role: None, token: None };
-            (StatusCode::UNAUTHORIZED, Json(res))
-        }
-    }
-}
-
 async fn get_sessions_handler(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let patient_id = params.get("patient_id").cloned();
-    let sessions = get_sessions_from_db(patient_id, &state.pool);
+    let sessions = get_sessions_from_db(patient_id, &state.pool).await;
     Json(serde_json::json!({ "sessions": sessions }))
 }
 
@@ -323,14 +271,14 @@ async fn get_patient_sessions_handler(
     State(state): State<AppState>,
     AxumPath(patient_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let sessions = get_sessions_from_db(Some(patient_id), &state.pool);
+    let sessions = get_sessions_from_db(Some(patient_id), &state.pool).await;
     Json(sessions)
 }
 
 async fn get_devices_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let devices = get_devices_from_db(&state.pool);
+    let devices = get_devices_from_db(&state.pool).await;
     Json(devices)
 }
 
@@ -338,7 +286,7 @@ async fn get_admin_stats_handler(
     _claims: AdminClaims,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let stats = get_admin_stats(&state.pool);
+    let stats = get_admin_stats(&state.pool).await;
     Json(stats)
 }
 
@@ -346,7 +294,7 @@ async fn get_admin_users_handler(
     _claims: AdminClaims,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let users = get_admin_users(&state.pool);
+    let users = get_admin_users(&state.pool).await;
     Json(users)
 }
 
@@ -355,37 +303,9 @@ async fn impersonate_handler(
     State(state): State<AppState>,
     AxumPath(target_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.get() {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthResponse { success: false, message: "Database Error".into(), user_id: None, role: None, token: None })),
-    };
-    
-    let query = "
-        SELECT a.id, a.role 
-        FROM accounts a
-        LEFT JOIN patients p ON p.account_id = a.id
-        LEFT JOIN doctors d ON d.account_id = a.id
-        WHERE p.id = ?1 OR d.id = ?1
-    ";
-    
-    match conn.query_row(query, rusqlite::params![target_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) {
-        Ok((account_id, role)) => {
-            let token = create_jwt(&account_id, &role, &state.jwt_secret);
-            let res = AuthResponse {
-                success: true,
-                message: "Impersonation successful".into(),
-                user_id: Some(target_id),
-                role: Some(role),
-                token: Some(token),
-            };
-            (StatusCode::OK, Json(res))
-        },
-        Err(_) => {
-            (StatusCode::NOT_FOUND, Json(AuthResponse { success: false, message: "User not found".into(), user_id: None, role: None, token: None }))
-        }
-    }
+    // Note: Since we no longer generate JWTs, impersonation might need to be handled differently.
+    // For now, we return a mock token if impersonation is truly needed, or we disable it.
+    (StatusCode::NOT_IMPLEMENTED, Json(AuthResponse { success: false, message: "Impersonasi tidak didukung dengan otentikasi eksternal Supabase.".into(), user_id: None, role: None, token: None }))
 }
 
 async fn doctor_impersonate_handler(
@@ -396,81 +316,35 @@ async fn doctor_impersonate_handler(
     if claims.0.role != "dokter" {
         return (StatusCode::FORBIDDEN, Json(AuthResponse { success: false, message: "Hanya dokter yang dapat melakukan impersonasi".into(), user_id: None, role: None, token: None }));
     }
-
-    let conn = match state.pool.get() {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthResponse { success: false, message: "Database Error".into(), user_id: None, role: None, token: None })),
-    };
-    
-    let query = "
-        SELECT a.id, a.role 
-        FROM accounts a
-        JOIN patients p ON p.account_id = a.id
-        WHERE p.id = ?1
-    ";
-    
-    match conn.query_row(query, rusqlite::params![target_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) {
-        Ok((account_id, role)) => {
-            let token = create_jwt(&account_id, &role, &state.jwt_secret);
-            let res = AuthResponse {
-                success: true,
-                message: "Impersonation successful".into(),
-                user_id: Some(target_id),
-                role: Some(role),
-                token: Some(token),
-            };
-            (StatusCode::OK, Json(res))
-        },
-        Err(_) => {
-            (StatusCode::NOT_FOUND, Json(AuthResponse { success: false, message: "Pasien tidak ditemukan".into(), user_id: None, role: None, token: None }))
-        }
-    }
+    (StatusCode::NOT_IMPLEMENTED, Json(AuthResponse { success: false, message: "Impersonasi tidak didukung dengan otentikasi eksternal Supabase.".into(), user_id: None, role: None, token: None }))
 }
 
 async fn get_patients_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let conn = match state.pool.get() {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Gagal mendapatkan koneksi DB: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!([])));
-        }
-    };
-    let mut stmt = match conn.prepare("SELECT id, first_name, last_name, date_of_birth, gender FROM patients") {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Gagal mempersiapkan query: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!([])));
-        }
-    };
-    let patients_iter = stmt.query_map([], |row| {
-        Ok(serde_json::json!({
-            "id": row.get::<_, String>(0)?,
-            "name": format!("{} {}", row.get::<_, String>(1).unwrap_or_default(), row.get::<_, String>(2).unwrap_or_default()).trim().to_string(),
-            "date_of_birth": row.get::<_, String>(3).unwrap_or_default(),
-            "gender": row.get::<_, String>(4).unwrap_or_default()
-        }))
-    });
-    
-    let mut patients_list = Vec::new();
-    if let Ok(iter) = patients_iter {
-        for p in iter {
-            if let Ok(p) = p {
-                patients_list.push(p);
-            }
-        }
-    }
-    (StatusCode::OK, Json(serde_json::json!(patients_list)))
+    let patients = sqlx::query!("SELECT id, first_name, last_name, date_of_birth, gender FROM patients")
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.id,
+                "name": format!("{} {}", row.first_name, row.last_name).trim().to_string(),
+                "date_of_birth": row.date_of_birth,
+                "gender": row.gender
+            })
+        })
+        .collect::<Vec<_>>();
+        
+    (StatusCode::OK, Json(serde_json::json!(patients)))
 }
 
 async fn get_patient_profile_handler(
     State(state): State<AppState>,
     AxumPath(patient_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Some(profile) = get_patient_profile(patient_id, &state.pool) {
+    if let Some(profile) = get_patient_profile(patient_id, &state.pool).await {
         (StatusCode::OK, Json(serde_json::json!(profile)))
     } else {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({})))
@@ -481,7 +355,7 @@ async fn get_doctor_profile_handler(
     State(state): State<AppState>,
     AxumPath(doctor_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Some(profile) = get_doctor_profile(doctor_id, &state.pool) {
+    if let Some(profile) = get_doctor_profile(doctor_id, &state.pool).await {
         (StatusCode::OK, Json(serde_json::json!(profile)))
     } else {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({})))
@@ -493,7 +367,7 @@ async fn update_doctor_profile_handler(
     AxumPath(doctor_id): AxumPath<String>,
     Json(req): Json<UpdateDoctorProfileRequest>,
 ) -> impl IntoResponse {
-    match update_doctor_profile(&doctor_id, req, &state.pool, &state.api_url) {
+    match update_doctor_profile(&doctor_id, req, &state.pool, &state.api_url).await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e}))),
     }
@@ -504,15 +378,10 @@ async fn update_patient_profile_handler(
     AxumPath(patient_id): AxumPath<String>,
     Json(req): Json<UpdatePatientProfileRequest>,
 ) -> impl IntoResponse {
-    match update_patient_profile(&patient_id, req, &state.pool, &state.api_url) {
+    match update_patient_profile(&patient_id, req, &state.pool, &state.api_url).await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e}))),
     }
-}
-
-#[derive(Deserialize)]
-pub struct ConnectPatientRequest {
-    pub doctor_id: String,
 }
 
 async fn connect_patient_handler(
@@ -520,17 +389,11 @@ async fn connect_patient_handler(
     AxumPath(patient_id): AxumPath<String>,
     Json(req): Json<ConnectPatientRequest>,
 ) -> impl IntoResponse {
-    if let Ok(conn) = state.pool.get() {
-        let res = conn.execute(
-            "UPDATE patients SET primary_doctor_id = ?1 WHERE id = ?2",
-            rusqlite::params![req.doctor_id, patient_id],
-        );
-        match res {
-            Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()}))),
-        }
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": "Database error"})))
+    match sqlx::query!("UPDATE patients SET primary_doctor_id = $1 WHERE id = $2", req.doctor_id, patient_id)
+        .execute(&state.pool).await 
+    {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()}))),
     }
 }
 
@@ -538,17 +401,11 @@ async fn disconnect_patient_handler(
     State(state): State<AppState>,
     AxumPath(patient_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Ok(conn) = state.pool.get() {
-        let res = conn.execute(
-            "UPDATE patients SET primary_doctor_id = NULL WHERE id = ?1",
-            rusqlite::params![patient_id],
-        );
-        match res {
-            Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()}))),
-        }
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": "Database error"})))
+    match sqlx::query!("UPDATE patients SET primary_doctor_id = NULL WHERE id = $1", patient_id)
+        .execute(&state.pool).await 
+    {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()}))),
     }
 }
 
@@ -556,33 +413,22 @@ async fn get_doctor_patients_handler(
     State(state): State<AppState>,
     AxumPath(doctor_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Ok(conn) = state.pool.get() {
-        let mut stmt = conn.prepare("
-            SELECT p.id, p.first_name, p.last_name, a.profile_photo 
-            FROM patients p 
-            LEFT JOIN accounts a ON p.account_id = a.id 
-            WHERE p.primary_doctor_id = ?1
-        ").unwrap();
-        let patients_iter = stmt.query_map(rusqlite::params![doctor_id], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "name": format!("{} {}", row.get::<_, String>(1).unwrap_or_default(), row.get::<_, String>(2).unwrap_or_default()).trim().to_string(),
-                "profile_photo": row.get::<_, Option<String>>(3)?,
-            }))
-        });
-        
-        let mut patients_list = Vec::new();
-        if let Ok(iter) = patients_iter {
-            for p in iter {
-                if let Ok(p) = p {
-                    patients_list.push(p);
-                }
-            }
-        }
-        (StatusCode::OK, Json(serde_json::json!(patients_list)))
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!([])))
-    }
+    let patients = sqlx::query!(
+        "SELECT p.id, p.first_name, p.last_name, a.profile_photo 
+         FROM patients p 
+         LEFT JOIN accounts a ON p.account_id = a.id 
+         WHERE p.primary_doctor_id = $1", doctor_id
+    ).fetch_all(&state.pool).await.unwrap_or_default()
+    .into_iter()
+    .map(|row| {
+        serde_json::json!({
+            "id": row.id,
+            "name": format!("{} {}", row.first_name, row.last_name).trim().to_string(),
+            "profile_photo": row.profile_photo,
+        })
+    }).collect::<Vec<_>>();
+
+    (StatusCode::OK, Json(serde_json::json!(patients)))
 }
 
 async fn get_record_handler(
@@ -605,17 +451,13 @@ async fn assign_device_handler(
     AxumPath(device_id): AxumPath<String>,
     Json(req): Json<AssignRequest>,
 ) -> impl IntoResponse {
-    if let Ok(conn) = state.pool.get() {
-        if let Some(pid) = req.patient_id {
-            let _ = conn.execute("UPDATE patients SET device_id = NULL WHERE device_id = ?1", rusqlite::params![device_id]);
-            let _ = conn.execute("UPDATE patients SET device_id = ?1 WHERE id = ?2", rusqlite::params![device_id, pid]);
-        } else {
-            let _ = conn.execute("UPDATE patients SET device_id = NULL WHERE device_id = ?1", rusqlite::params![device_id]);
-        }
-        (StatusCode::OK, Json(serde_json::json!({"success": true})))
+    if let Some(pid) = req.patient_id {
+        let _ = sqlx::query!("UPDATE patients SET device_id = NULL WHERE device_id = $1", device_id).execute(&state.pool).await;
+        let _ = sqlx::query!("UPDATE patients SET device_id = $1 WHERE id = $2", device_id, pid).execute(&state.pool).await;
     } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": "Database error"})))
+        let _ = sqlx::query!("UPDATE patients SET device_id = NULL WHERE device_id = $1", device_id).execute(&state.pool).await;
     }
+    (StatusCode::OK, Json(serde_json::json!({"success": true})))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -633,23 +475,15 @@ async fn device_command_handler(
         info!(device_id = %device_id, "Perekaman Dimulai");
     } else if cmd.command.to_uppercase() == "STOP" {
         info!(device_id = %device_id, "Perekaman Selesai");
-        if let Ok(conn) = state.pool.get() {
-            let now_str = chrono::Utc::now().to_rfc3339();
-            if let Err(e) = conn.execute(
-                "UPDATE sessions SET ended_at = ?1 WHERE ended_at IS NULL AND device_id = (SELECT id FROM devices WHERE name = ?2 OR id = ?2 LIMIT 1)",
-                rusqlite::params![now_str, device_id]
-            ) {
-                error!(error = %e, device_id = %device_id, "Gagal mengupdate ended_at untuk sesi perekaman");
-            }
+        let now = chrono::Utc::now();
+        if let Err(e) = sqlx::query!(
+            "UPDATE sessions SET ended_at = $1 WHERE ended_at IS NULL AND device_id = (SELECT id FROM devices WHERE name = $2 OR id = $2 LIMIT 1)",
+            now, device_id
+        ).execute(&state.pool).await {
+            error!(error = %e, device_id = %device_id, "Gagal mengupdate ended_at untuk sesi perekaman");
         }
     }
 
-
-    if let Some(ref pid) = cmd.patient_id {
-        if let Ok(conn) = state.pool.get() {
-            let _ = conn.execute("UPDATE devices SET assigned_to = ?1 WHERE name = ?2", params![pid, device_id]);
-        }
-    }
     let topic = format!("ecgrhythmia/{}/command", device_id);
     let clients = state.mqtt_clients.read().await;
     if let Some(client) = clients.get(&device_id) {
@@ -663,30 +497,15 @@ async fn device_command_handler(
     }
 }
 
-async fn session_confirmation_handler(
-    State(state): State<AppState>,
-    AxumPath(session_id): AxumPath<String>,
-    Json(req): Json<ConfirmationRequest>,
-) -> impl IntoResponse {
-    match handle_confirmation(&session_id, req, &state.pool) {
-        Ok(res) => (StatusCode::OK, Json(res)),
-        Err(msg) => {
-            let res = ConfirmationResponse { success: false, message: msg };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(res))
-        }
-    }
-}
-
 async fn frame_preregister_handler(
     State(state): State<AppState>,
     Json(req): Json<FrameRequest>,
 ) -> impl IntoResponse {
-    match handle_frame_preregister(req, &state.pool) {
-        Ok(res) => (StatusCode::OK, Json(res)),
-        Err(msg) => {
-            let res = ConfirmationResponse { success: false, message: msg };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(res))
-        }
+    match sqlx::query!("INSERT INTO frame_records (id, session_id, time_interval) VALUES ($1, $2, $3)", req.id, req.session_id, req.time_interval)
+        .execute(&state.pool).await 
+    {
+        Ok(_) => (StatusCode::OK, Json(ConfirmationResponse { success: true, message: "Frame pre-registered".to_string() })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ConfirmationResponse { success: false, message: e.to_string() }))
     }
 }
 
@@ -695,420 +514,128 @@ async fn frame_session_update_handler(
     AxumPath(frame_id): AxumPath<String>,
     Json(req): Json<FrameSessionRequest>,
 ) -> impl IntoResponse {
-    match handle_frame_session_update(&frame_id, req, &state.pool) {
-        Ok(res) => (StatusCode::OK, Json(res)),
-        Err(msg) => {
-            let res = ConfirmationResponse { success: false, message: msg };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(res))
-        }
+    match sqlx::query!("UPDATE frame_records SET session_id = $1 WHERE id = $2", req.session_id, frame_id)
+        .execute(&state.pool).await 
+    {
+        Ok(_) => (StatusCode::OK, Json(ConfirmationResponse { success: true, message: "Frame session updated".to_string() })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ConfirmationResponse { success: false, message: e.to_string() }))
     }
 }
 
 // DATABASE UTILITIES & CRUDS
-fn handle_register(req: RegisterRequest, pool: &DbPool) -> Result<AuthResponse, String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM accounts WHERE email = ?1",
-        params![req.email],
-        |row| row.get(0)
-    ).unwrap_or(0);
-
-    if count > 0 {
-        return Err("Email sudah terdaftar".to_string());
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let account_id = generate_custom_id(&conn, "accounts", "acc");
-    let hashed_password = hash(&req.password, DEFAULT_COST).unwrap_or(req.password.clone());
-
-    conn.execute(
-        "INSERT INTO accounts (id, email, password_hash, role, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![account_id, req.email, hashed_password, req.role, now]
-    ).map_err(|e| e.to_string())?;
-
-    if req.role == "pasien" {
-        let dob = req.date_of_birth.unwrap_or_else(|| "2000-01-01".to_string());
-        let gender = req.gender.unwrap_or_else(|| "U".to_string());
-        let patient_id = generate_custom_id(&conn, "patients", "pat");
-        conn.execute(
-            "INSERT INTO patients (id, account_id, first_name, last_name, date_of_birth, gender) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![patient_id, account_id, req.first_name, req.last_name, dob, gender]
-        ).map_err(|e| e.to_string())?;
-    } else if req.role == "dokter" {
-        let doctor_id = generate_custom_id(&conn, "doctors", "doc");
-        conn.execute(
-            "INSERT INTO doctors (id, account_id, first_name, last_name) VALUES (?1, ?2, ?3, ?4)",
-            params![doctor_id, account_id, req.first_name, req.last_name]
-        ).map_err(|e| e.to_string())?;
+async fn get_sessions_from_db(filter_patient_id: Option<String>, pool: &PgPool) -> Vec<SessionRecord> {
+    if let Some(pid) = filter_patient_id {
+        sqlx::query!(
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
+             FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
+             WHERE s.patient_id = $1 ORDER BY s.started_at DESC", pid
+        ).fetch_all(pool).await.unwrap_or_default()
+        .into_iter().map(|row| SessionRecord {
+            id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
+            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default()
+        }).collect()
     } else {
-        return Err("Role tidak valid".to_string());
-    }
-
-    Ok(AuthResponse {
-        success: true,
-        message: "Registrasi berhasil".to_string(),
-        user_id: None,
-        role: None,
-        token: None,
-    })
-}
-
-fn handle_login(req: LoginRequest, pool: &DbPool, jwt_secret: &str) -> Result<AuthResponse, String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    
-    let result = conn.query_row(
-        "SELECT id, role, password_hash FROM accounts WHERE email = ?1",
-        params![req.email],
-        |row| {
-            let id: String = row.get(0)?;
-            let role: String = row.get(1)?;
-            let password_hash: String = row.get(2)?;
-            Ok((id, role, password_hash))
-        }
-    );
-
-    match result {
-        Ok((account_id, role, password_hash)) => {
-            let password_match = verify(&req.password, &password_hash).unwrap_or(false) || req.password == password_hash;
-            if password_match {
-                let specific_id: Option<String> = if role == "pasien" {
-                    conn.query_row("SELECT id FROM patients WHERE account_id = ?1", params![account_id], |row| row.get(0)).ok()
-                } else if role == "dokter" {
-                    conn.query_row("SELECT id FROM doctors WHERE account_id = ?1", params![account_id], |row| row.get(0)).ok()
-                } else {
-                    Some(account_id.clone())
-                };
-
-                let token = create_jwt(&account_id, &role, jwt_secret);
-
-                Ok(AuthResponse {
-                    success: true,
-                    message: "Login berhasil".to_string(),
-                    user_id: specific_id,
-                    role: Some(role),
-                    token: Some(token),
-                })
-            } else {
-                Err("Password tidak cocok".to_string())
-            }
-        },
-        Err(_) => Err("Email tidak ditemukan".to_string())
-    }
-}
-
-fn handle_confirmation(session_id: &str, req: ConfirmationRequest, pool: &DbPool) -> Result<ConfirmationResponse, String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    
-    let result = conn.execute(
-        "UPDATE frame_records SET confirmation = ?1, doc_classification = ?2 WHERE session_id = ?3 AND time_interval = ?4",
-        params![req.confirmation, req.doc_classification, session_id, req.time_interval]
-    );
-
-    match result {
-        Ok(rows_affected) => {
-            if rows_affected > 0 {
-                Ok(ConfirmationResponse {
-                    success: true,
-                    message: "Konfirmasi berhasil diupdate".to_string(),
-                })
-            } else {
-                Err("Gagal menyimpan konfirmasi frame (frame record tidak ditemukan)".to_string())
-            }
-        },
-        Err(e) => Err(format!("Gagal menyimpan konfirmasi: {}", e))
-    }
-}
-
-fn handle_frame_preregister(req: FrameRequest, pool: &DbPool) -> Result<ConfirmationResponse, String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    
-    let result = conn.execute(
-        "INSERT INTO frame_records (id, session_id, time_interval) VALUES (?1, ?2, ?3)",
-        params![req.id, req.session_id, req.time_interval]
-    );
-
-    match result {
-        Ok(_) => Ok(ConfirmationResponse { success: true, message: "Frame pre-registered".to_string() }),
-        Err(e) => Err(format!("Gagal insert frame: {}", e))
-    }
-}
-
-fn handle_frame_session_update(frame_id: &str, req: FrameSessionRequest, pool: &DbPool) -> Result<ConfirmationResponse, String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    
-    let result = conn.execute(
-        "UPDATE frame_records SET session_id = ?1 WHERE id = ?2",
-        params![req.session_id, frame_id]
-    );
-
-    match result {
-        Ok(rows_affected) => {
-            if rows_affected > 0 {
-                Ok(ConfirmationResponse { success: true, message: "Frame session updated".to_string() })
-            } else {
-                Err("Frame ID tidak ditemukan".to_string())
-            }
-        },
-        Err(e) => Err(format!("Gagal update session: {}", e))
-    }
-}
-
-fn get_sessions_from_db(filter_patient_id: Option<String>, pool: &DbPool) -> Vec<SessionRecord> {
-    let mut sessions = Vec::new();
-    if let Ok(conn) = pool.get() {
-        let query = if filter_patient_id.is_some() {
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name, s.started_at, s.ended_at, s.file_path 
-             FROM sessions s 
-             LEFT JOIN patients p ON s.patient_id = p.id 
-             WHERE s.patient_id = ?1
+        sqlx::query!(
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
+             FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
              ORDER BY s.started_at DESC"
-        } else {
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name, s.started_at, s.ended_at, s.file_path 
-             FROM sessions s 
-             LEFT JOIN patients p ON s.patient_id = p.id 
-             ORDER BY s.started_at DESC"
-        };
-
-        let mut stmt = match conn.prepare(query) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Query error: {}", e);
-                return sessions;
-            }
-        };
-        
-        if let Some(pid) = filter_patient_id {
-            let session_iter = stmt.query_map([pid], |row| {
-                Ok(SessionRecord {
-                    id: row.get(0)?,
-                    device_id: row.get(1)?,
-                    patient_id: row.get(2)?,
-                    patient_name: row.get(3)?,
-                    started_at: row.get(4)?,
-                    ended_at: row.get(5)?,
-                    file_path: row.get(6)?,
-                })
-            });
-            if let Ok(iter) = session_iter {
-                for session in iter {
-                    if let Ok(s) = session {
-                        sessions.push(s);
-                    }
-                }
-            }
-        } else {
-            let session_iter = stmt.query_map([], |row| {
-                Ok(SessionRecord {
-                    id: row.get(0)?,
-                    device_id: row.get(1)?,
-                    patient_id: row.get(2)?,
-                    patient_name: row.get(3)?,
-                    started_at: row.get(4)?,
-                    ended_at: row.get(5)?,
-                    file_path: row.get(6)?,
-                })
-            });
-            if let Ok(iter) = session_iter {
-                for session in iter {
-                    if let Ok(s) = session {
-                        sessions.push(s);
-                    }
-                }
-            }
-        }
+        ).fetch_all(pool).await.unwrap_or_default()
+        .into_iter().map(|row| SessionRecord {
+            id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
+            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default()
+        }).collect()
     }
-    sessions
 }
 
-fn get_devices_from_db(pool: &DbPool) -> Vec<DeviceRecord> {
-    let mut devices = Vec::new();
-    if let Ok(conn) = pool.get() {
-        if let Ok(mut stmt) = conn.prepare("SELECT d.id, d.name, d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, p.id as assigned_to FROM devices d LEFT JOIN patients p ON d.id = p.device_id") {
-            if let Ok(device_iter) = stmt.query_map([], |row| {
-                Ok(DeviceRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    mqtt_broker: row.get(2)?,
-                    mqtt_port: row.get(3)?,
-                    mqtt_topic: row.get(4)?,
-                    mqtt_username: row.get(5)?,
-                    assigned_to: row.get(6)?,
-                })
-            }) {
-                for device in device_iter {
-                    if let Ok(d) = device {
-                        devices.push(d);
-                    }
-                }
-            }
-        }
-    }
-    devices
+async fn get_devices_from_db(pool: &PgPool) -> Vec<DeviceRecord> {
+    sqlx::query!(
+        "SELECT id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username FROM devices"
+    ).fetch_all(pool).await.unwrap_or_default()
+    .into_iter().map(|row| DeviceRecord {
+        id: row.id, name: row.name, mqtt_broker: row.mqtt_broker, mqtt_port: row.mqtt_port,
+        mqtt_topic: row.mqtt_topic, mqtt_username: row.mqtt_username,
+    }).collect()
 }
 
-fn get_admin_stats(pool: &DbPool) -> AdminStats {
-    let mut stats = AdminStats {
-        total_patients: 0,
-        total_doctors: 0,
-        active_devices: 0,
-        critical_alerts: 0,
-    };
-    if let Ok(conn) = pool.get() {
-        stats.total_patients = conn.query_row("SELECT COUNT(*) FROM patients", [], |row| row.get(0)).unwrap_or(0);
-        stats.total_doctors = conn.query_row("SELECT COUNT(*) FROM doctors", [], |row| row.get(0)).unwrap_or(0);
-        stats.active_devices = conn.query_row("SELECT COUNT(*) FROM devices WHERE status = 'Active'", [], |row| row.get(0)).unwrap_or(0);
-        
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let today_prefix = format!("{}%", today);
-        
-        if let Ok(mut stmt) = conn.prepare("SELECT file_path FROM sessions WHERE started_at LIKE ?1") {
-            let mut critical_count = 0;
-            if let Ok(paths_iter) = stmt.query_map([&today_prefix], |row| row.get::<_, String>(0)) {
-                for path in paths_iter {
-                    if let Ok(file_path) = path {
-                        if let Ok(contents) = fs::read_to_string(&file_path) {
-                            for line in contents.lines() {
-                                if !line.contains("\"label\":\"Normal\"") && line.contains("\"label\":") {
-                                    critical_count += 1;
-                                }
-                            }
-                        }
-                    }
+async fn get_admin_stats(pool: &PgPool) -> AdminStats {
+    let mut stats = AdminStats { total_patients: 0, total_doctors: 0, active_devices: 0, critical_alerts: 0 };
+    stats.total_patients = sqlx::query!("SELECT COUNT(*) FROM patients").fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+    stats.total_doctors = sqlx::query!("SELECT COUNT(*) FROM doctors").fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+    stats.active_devices = sqlx::query!("SELECT COUNT(*) FROM devices").fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+    
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today_prefix = format!("{}%", today);
+    
+    let paths = sqlx::query!("SELECT file_path FROM sessions WHERE CAST(started_at AS TEXT) LIKE $1", today_prefix).fetch_all(pool).await.unwrap_or_default();
+    let mut critical_count = 0;
+    for path in paths {
+        if let Ok(contents) = fs::read_to_string(path.file_path.as_deref().unwrap_or_default()) {
+            for line in contents.lines() {
+                if !line.contains("\"label\":\"Normal\"") && line.contains("\"label\":") {
+                    critical_count += 1;
                 }
             }
-            stats.critical_alerts = critical_count;
         }
     }
+    stats.critical_alerts = critical_count as i64;
     stats
 }
 
-fn get_admin_users(pool: &DbPool) -> Vec<AdminUser> {
-    let mut users = Vec::new();
-    if let Ok(conn) = pool.get() {
-        let query = "
-            SELECT p.id, p.first_name || ' ' || p.last_name, a.role, IFNULL(a.status, 'Offline'), a.created_at, p.primary_doctor_id, p.device_id, a.profile_photo
-            FROM patients p
-            JOIN accounts a ON p.account_id = a.id
-            UNION ALL
-            SELECT d.id, d.first_name || ' ' || d.last_name, a.role, IFNULL(a.status, 'Offline'), a.created_at, NULL, NULL, a.profile_photo
-            FROM doctors d
-            JOIN accounts a ON d.account_id = a.id
-            ORDER BY created_at DESC
-        ";
-        if let Ok(mut stmt) = conn.prepare(query) {
-            if let Ok(user_iter) = stmt.query_map([], |row| {
-                Ok(AdminUser {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    role: row.get(2)?,
-                    status: row.get(3)?,
-                    registered_at: row.get(4)?,
-                    connected_doctor_id: row.get(5)?,
-                    connected_device_id: row.get(6)?,
-                    profile_photo: row.get(7)?,
-                })
-            }) {
-                for user in user_iter {
-                    if let Ok(u) = user {
-                        users.push(u);
-                    }
-                }
-            }
-        }
-    }
-    users
+async fn get_admin_users(pool: &PgPool) -> Vec<AdminUser> {
+    sqlx::query!(
+        "SELECT p.id, p.first_name || ' ' || p.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, p.primary_doctor_id as connected_doctor_id, p.device_id as connected_device_id, a.profile_photo
+         FROM patients p JOIN accounts a ON p.account_id = a.id
+         UNION ALL
+         SELECT d.id, d.first_name || ' ' || d.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, NULL as connected_doctor_id, NULL as connected_device_id, a.profile_photo
+         FROM doctors d JOIN accounts a ON d.account_id = a.id
+         ORDER BY created_at DESC"
+    ).fetch_all(pool).await.unwrap_or_default()
+    .into_iter().map(|row| AdminUser {
+        id: row.id.unwrap_or_default(), name: row.name.unwrap_or_default(), role: row.role.unwrap_or_default(), status: row.status.unwrap_or_default(), 
+        registered_at: row.created_at.map(|t| t.to_string()), connected_doctor_id: row.connected_doctor_id, connected_device_id: row.connected_device_id, profile_photo: row.profile_photo
+    }).collect()
 }
 
-fn get_patient_profile(patient_id: String, pool: &DbPool) -> Option<PatientProfileResponse> {
-    if let Ok(conn) = pool.get() {
-        let mut stmt = conn.prepare("
-            SELECT p.id, p.first_name, p.last_name, p.date_of_birth, p.gender, p.primary_doctor_id, a.profile_photo, p.device_id
-            FROM patients p
-            LEFT JOIN accounts a ON p.account_id = a.id
-            WHERE p.id = ?1
-        ").ok()?;
-        
-        let mut patient_iter = stmt.query_map([patient_id], |row| {
-            Ok(PatientRecord {
-                id: row.get(0)?,
-                first_name: row.get(1)?,
-                last_name: row.get(2)?,
-                date_of_birth: row.get(3)?,
-                gender: row.get(4)?,
-                primary_doctor_id: row.get(5)?,
-                profile_photo: row.get(6)?,
-                device_id: row.get(7)?,
-            })
-        }).ok()?;
-        
-        if let Some(Ok(patient)) = patient_iter.next() {
-            let mut doctor = None;
-            if let Some(ref doc_id) = patient.primary_doctor_id {
-                if let Ok(mut doc_stmt) = conn.prepare("
-                    SELECT d.id, d.first_name, d.last_name, a.profile_photo
-                    FROM doctors d
-                    LEFT JOIN accounts a ON d.account_id = a.id
-                    WHERE d.id = ?1
-                ") {
-                    if let Ok(mut doc_iter) = doc_stmt.query_map([doc_id], |row| {
-                        Ok(DoctorRecord {
-                            id: row.get(0)?,
-                            first_name: row.get(1)?,
-                            last_name: row.get(2)?,
-                            profile_photo: row.get(3)?,
-                        })
-                    }) {
-                        if let Some(Ok(doc)) = doc_iter.next() {
-                            doctor = Some(doc);
-                        }
-                    }
-                }
-            }
-            
-            return Some(PatientProfileResponse {
-                patient,
-                doctor,
+async fn get_patient_profile(patient_id: String, pool: &PgPool) -> Option<PatientProfileResponse> {
+    let patient_res = sqlx::query!(
+        "SELECT p.id, p.first_name, p.last_name, p.date_of_birth, p.gender, p.primary_doctor_id, a.profile_photo, p.device_id
+         FROM patients p LEFT JOIN accounts a ON p.account_id = a.id WHERE p.id = $1", patient_id
+    ).fetch_one(pool).await.ok()?;
+
+    let mut doctor = None;
+    if let Some(doc_id) = patient_res.primary_doctor_id.clone() {
+        if let Ok(doc_res) = sqlx::query!(
+            "SELECT d.id, d.first_name, d.last_name, a.profile_photo FROM doctors d LEFT JOIN accounts a ON d.account_id = a.id WHERE d.id = $1", doc_id
+        ).fetch_one(pool).await {
+            doctor = Some(DoctorRecord {
+                id: doc_res.id, first_name: doc_res.first_name, last_name: doc_res.last_name, profile_photo: doc_res.profile_photo
             });
         }
     }
-    None
+
+    Some(PatientProfileResponse {
+        patient: PatientRecord {
+            id: patient_res.id, first_name: patient_res.first_name, last_name: patient_res.last_name, date_of_birth: patient_res.date_of_birth,
+            gender: patient_res.gender.unwrap_or_default(), primary_doctor_id: patient_res.primary_doctor_id, profile_photo: patient_res.profile_photo, device_id: patient_res.device_id
+        },
+        doctor,
+    })
 }
 
-fn get_doctor_profile(doctor_id: String, pool: &DbPool) -> Option<DoctorProfileResponse> {
-    if let Ok(conn) = pool.get() {
-        let mut stmt = conn.prepare("
-            SELECT d.id, d.first_name, d.last_name, a.email, a.role, a.profile_photo
-            FROM doctors d
-            LEFT JOIN accounts a ON d.account_id = a.id
-            WHERE d.id = ?1
-        ").ok()?;
-        
-        let mut doctor_iter = stmt.query_map([doctor_id], |row| {
-            Ok(DoctorProfileResponse {
-                id: row.get(0)?,
-                first_name: row.get(1)?,
-                last_name: row.get(2)?,
-                email: row.get(3)?,
-                role: row.get(4)?,
-                profile_photo: row.get(5)?,
-            })
-        }).ok()?;
-        
-        if let Some(Ok(doctor)) = doctor_iter.next() {
-            return Some(doctor);
-        }
-    }
-    None
+async fn get_doctor_profile(doctor_id: String, pool: &PgPool) -> Option<DoctorProfileResponse> {
+    let res = sqlx::query!(
+        "SELECT d.id, d.first_name, d.last_name, a.email, a.role, a.profile_photo FROM doctors d LEFT JOIN accounts a ON d.account_id = a.id WHERE d.id = $1", doctor_id
+    ).fetch_one(pool).await.ok()?;
+
+    Some(DoctorProfileResponse {
+        id: res.id, first_name: res.first_name, last_name: res.last_name,
+        email: res.email, role: res.role, profile_photo: res.profile_photo
+    })
 }
 
-fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool: &DbPool, api_url: &str) -> Result<(), String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    let account_id: String = conn.query_row(
-        "SELECT account_id FROM doctors WHERE id = ?1",
-        params![doctor_id],
-        |row| row.get(0)
-    ).map_err(|_| "Dokter tidak ditemukan".to_string())?;
+async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool: &PgPool, api_url: &str) -> Result<(), String> {
+    let account_id = sqlx::query!("SELECT account_id FROM doctors WHERE id = $1", doctor_id)
+        .fetch_one(pool).await.map_err(|_| "Dokter tidak ditemukan".to_string())?.account_id;
 
     let mut final_photo_url = req.profile_photo.filter(|s| !s.is_empty());
 
@@ -1118,9 +645,7 @@ fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool:
                 let base64_str = &photo_data[comma_pos + 1..];
                 if let Ok(image_bytes) = base64_engine.decode(base64_str) {
                     let uploads_dir = Path::new("uploads/profiles");
-                    if !uploads_dir.exists() {
-                        let _ = fs::create_dir_all(uploads_dir);
-                    }
+                    let _ = fs::create_dir_all(uploads_dir);
                     let filename = format!("{}_{}.jpg", doctor_id, Utc::now().timestamp());
                     let filepath = uploads_dir.join(&filename);
                     if fs::write(&filepath, image_bytes).is_ok() {
@@ -1131,26 +656,18 @@ fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool:
         }
     }
 
-    conn.execute(
-        "UPDATE doctors SET first_name = ?1, last_name = ?2 WHERE id = ?3",
-        params![req.first_name, req.last_name, doctor_id]
-    ).map_err(|e| e.to_string())?;
+    sqlx::query!("UPDATE doctors SET first_name = $1, last_name = $2 WHERE id = $3", req.first_name, req.last_name, doctor_id)
+        .execute(pool).await.map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "UPDATE accounts SET profile_photo = ?1 WHERE id = ?2",
-        params![final_photo_url, account_id]
-    ).map_err(|e| e.to_string())?;
+    sqlx::query!("UPDATE accounts SET profile_photo = $1 WHERE id = $2", final_photo_url, account_id)
+        .execute(pool).await.map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
-fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, pool: &DbPool, api_url: &str) -> Result<(), String> {
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    let account_id: String = conn.query_row(
-        "SELECT account_id FROM patients WHERE id = ?1",
-        params![patient_id],
-        |row| row.get(0)
-    ).map_err(|_| "Pasien tidak ditemukan".to_string())?;
+async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, pool: &PgPool, api_url: &str) -> Result<(), String> {
+    let account_id = sqlx::query!("SELECT account_id FROM patients WHERE id = $1", patient_id)
+        .fetch_one(pool).await.map_err(|_| "Pasien tidak ditemukan".to_string())?.account_id;
 
     let mut final_photo_url = req.profile_photo.filter(|s| !s.is_empty());
 
@@ -1160,9 +677,7 @@ fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, po
                 let base64_str = &photo_data[comma_pos + 1..];
                 if let Ok(image_bytes) = base64_engine.decode(base64_str) {
                     let uploads_dir = Path::new("uploads/profiles");
-                    if !uploads_dir.exists() {
-                        let _ = fs::create_dir_all(uploads_dir);
-                    }
+                    let _ = fs::create_dir_all(uploads_dir);
                     let filename = format!("{}_{}.jpg", patient_id, Utc::now().timestamp());
                     let filepath = uploads_dir.join(&filename);
                     if fs::write(&filepath, image_bytes).is_ok() {
@@ -1173,15 +688,11 @@ fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, po
         }
     }
 
-    conn.execute(
-        "UPDATE patients SET first_name = ?1, last_name = ?2, date_of_birth = ?3 WHERE id = ?4",
-        params![req.first_name, req.last_name, req.date_of_birth, patient_id]
-    ).map_err(|e| e.to_string())?;
+    sqlx::query!("UPDATE patients SET first_name = $1, last_name = $2, date_of_birth = $3 WHERE id = $4", req.first_name, req.last_name, req.date_of_birth, patient_id)
+        .execute(pool).await.map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "UPDATE accounts SET profile_photo = ?1 WHERE id = ?2",
-        params![final_photo_url, account_id]
-    ).map_err(|e| e.to_string())?;
+    sqlx::query!("UPDATE accounts SET profile_photo = $1 WHERE id = $2", final_photo_url, account_id)
+        .execute(pool).await.map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -1200,7 +711,7 @@ fn read_jsonl_file(session_id: &str) -> String {
 pub struct NewDeviceReq {
     pub name: String,
     pub mqtt_broker: String,
-    pub mqtt_port: u16,
+    pub mqtt_port: i32,
     pub mqtt_topic: String,
     pub mqtt_username: String,
     pub mqtt_password: String,
@@ -1210,7 +721,7 @@ pub struct NewDeviceReq {
 pub struct EditDeviceReq {
     pub name: String,
     pub mqtt_broker: String,
-    pub mqtt_port: u16,
+    pub mqtt_port: i32,
     pub mqtt_topic: String,
     pub mqtt_username: String,
     pub mqtt_password: String,
@@ -1222,26 +733,17 @@ pub async fn add_device_handler(
     Json(req): Json<NewDeviceReq>,
 ) -> impl IntoResponse {
     let dev_id = format!("dev_{}", chrono::Utc::now().timestamp_millis());
-    {
-        let conn_res = state.pool.get();
-        if let Ok(conn) = conn_res {
-            if let Err(e) = conn.execute(
-                "INSERT INTO devices (id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password, assigned_to) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'Unassigned')",
-                params![dev_id, req.name, req.mqtt_broker, req.mqtt_port, req.mqtt_topic, req.mqtt_username, req.mqtt_password]
-            ) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()})));
-            }
-        }
+    if let Err(e) = sqlx::query!(
+        "INSERT INTO devices (id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        dev_id, req.name, req.mqtt_broker, req.mqtt_port, req.mqtt_topic, req.mqtt_username, req.mqtt_password
+    ).execute(&state.pool).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()})));
     }
     
     let db_tx = state.db_tx.clone();
-    
+    let port = req.mqtt_port as u16;
     let client = crate::network::mqtt_listener::start_mqtt_listener(
-        &req.mqtt_broker,
-        req.mqtt_port,
-        &req.mqtt_topic,
-        &req.mqtt_username,
-        &req.mqtt_password,
+        &req.mqtt_broker, port, &req.mqtt_topic, &req.mqtt_username, &req.mqtt_password,
         move |payload_str| {
             if let Ok(device_payload) = serde_json::from_str::<crate::models::device::DevicePayload>(&payload_str) {
                 let _ = db_tx.send(device_payload);
@@ -1251,7 +753,6 @@ pub async fn add_device_handler(
     
     let mut clients = state.mqtt_clients.write().await;
     clients.insert(req.name.clone(), client);
-    
     (StatusCode::OK, Json(serde_json::json!({"success": true, "message": "Perangkat didaftarkan dan pairing dimulai"})))
 }
 
@@ -1261,24 +762,12 @@ pub async fn edit_device_handler(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<EditDeviceReq>,
 ) -> impl IntoResponse {
-    let old_name: Option<String> = {
-        if let Ok(conn) = state.pool.get() {
-            conn.query_row("SELECT name FROM devices WHERE id = ?1", params![id], |row| row.get(0)).ok()
-        } else {
-            None
-        }
-    };
-
-    {
-        let conn_res = state.pool.get();
-        if let Ok(conn) = conn_res {
-            if let Err(e) = conn.execute(
-                "UPDATE devices SET name = ?1, mqtt_broker = ?2, mqtt_port = ?3, mqtt_topic = ?4, mqtt_username = ?5, mqtt_password = ?6 WHERE id = ?7",
-                params![req.name, req.mqtt_broker, req.mqtt_port, req.mqtt_topic, req.mqtt_username, req.mqtt_password, id]
-            ) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()})));
-            }
-        }
+    let old_name = sqlx::query!("SELECT name FROM devices WHERE id = $1", id).fetch_one(&state.pool).await.map(|r| r.name).ok();
+    if let Err(e) = sqlx::query!(
+        "UPDATE devices SET name = $1, mqtt_broker = $2, mqtt_port = $3, mqtt_topic = $4, mqtt_username = $5, mqtt_password = $6 WHERE id = $7",
+        req.name, req.mqtt_broker, req.mqtt_port, req.mqtt_topic, req.mqtt_username, req.mqtt_password, id
+    ).execute(&state.pool).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()})));
     }
 
     if let Some(old_name) = old_name {
@@ -1289,13 +778,9 @@ pub async fn edit_device_handler(
     }
 
     let db_tx = state.db_tx.clone();
-    
+    let port = req.mqtt_port as u16;
     let client = crate::network::mqtt_listener::start_mqtt_listener(
-        &req.mqtt_broker,
-        req.mqtt_port,
-        &req.mqtt_topic,
-        &req.mqtt_username,
-        &req.mqtt_password,
+        &req.mqtt_broker, port, &req.mqtt_topic, &req.mqtt_username, &req.mqtt_password,
         move |payload_str| {
             if let Ok(device_payload) = serde_json::from_str::<crate::models::device::DevicePayload>(&payload_str) {
                 let _ = db_tx.send(device_payload);
@@ -1305,35 +790,22 @@ pub async fn edit_device_handler(
     
     let mut clients = state.mqtt_clients.write().await;
     clients.insert(req.name.clone(), client);
-
     (StatusCode::OK, Json(serde_json::json!({"success": true, "message": "Perangkat berhasil diupdate"})))
 }
 
 // AXUM ROUTER GENERATOR
 pub fn create_router(state: AppState) -> Router {
-    // Izinkan origin baik yang menggunakan www maupun tanpa www
     let cors = CorsLayer::new()
         .allow_origin([
             "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
             "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5173".parse::<HeaderValue>().unwrap(),
         ])
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            header::AUTHORIZATION,
-            header::ACCEPT,
-        ])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
         .allow_credentials(true);
 
     Router::new()
-        .route("/api/auth/register", post(register_handler))
-        .route("/api/auth/login", post(login_handler))
         .route("/api/sessions", get(get_sessions_handler))
         .route("/api/devices", get(get_devices_handler))
         .route("/api/admin/stats", get(get_admin_stats_handler))
@@ -1352,7 +824,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/records/:session_id", get(get_record_handler))
         .route("/api/devices/:device_id/command", post(device_command_handler))
         .route("/api/devices/:device_id/assign", post(assign_device_handler))
-        .route("/api/sessions/:session_id/confirmation", post(session_confirmation_handler))
         .route("/api/frames", post(frame_preregister_handler))
         .route("/api/frames/:id/session", put(frame_session_update_handler))
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))

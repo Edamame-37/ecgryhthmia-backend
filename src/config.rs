@@ -13,17 +13,14 @@ pub struct AppConfig {
     pub mqtt_username: String,
     pub mqtt_password: String,
     pub jwt_secret: String,
-    pub sqlite_key: String,
-    pub db_path: String,
-    pub default_admin_email: String,
-    pub default_admin_password: String,
+    pub database_url: String,
 }
 
 impl AppConfig {
     pub fn load() -> Self {
         dotenv().ok();
 
-                let host_ip = env::var("HOST_IP")
+        let host_ip = env::var("HOST_IP")
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "127.0.0.1".to_string());
@@ -48,7 +45,7 @@ impl AppConfig {
             .parse::<u16>()
             .unwrap_or(8883);
             
-                let mqtt_topic = env::var("MQTT_TOPIC")
+        let mqtt_topic = env::var("MQTT_TOPIC")
             .ok()
             .filter(|s| !s.is_empty())
             .expect("[Config] ERROR: MQTT_TOPIC belum diset di .env!");
@@ -67,22 +64,11 @@ impl AppConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .expect("[Config] ERROR: JWT_SECRET belum diset di .env!");
-        
-        let sqlite_key = env::var("SQLITE_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .expect("[Config] ERROR: SQLITE_KEY belum diset di .env!");
-
-                let db_path = env::var("DB_PATH")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "database.db".to_string());
-
-        let default_admin_email = env::var("DEFAULT_ADMIN_EMAIL")
-            .expect("[Config] ERROR: DEFAULT_ADMIN_EMAIL belum diset di .env!");
             
-        let default_admin_password = env::var("DEFAULT_ADMIN_PASSWORD")
-            .expect("[Config] ERROR: DEFAULT_ADMIN_PASSWORD belum diset di .env!");
+        let database_url = env::var("DATABASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .expect("[Config] ERROR: DATABASE_URL belum diset di .env!");
 
         AppConfig {
             host_ip,
@@ -94,10 +80,7 @@ impl AppConfig {
             mqtt_username,
             mqtt_password,
             jwt_secret,
-            sqlite_key,
-            db_path,
-            default_admin_email,
-            default_admin_password,
+            database_url,
         }
     }
 }
@@ -117,10 +100,7 @@ mod tests {
         std::env::set_var("MQTT_USERNAME", "testuser");
         std::env::set_var("MQTT_PASSWORD", "testpass");
         std::env::set_var("JWT_SECRET", "testsecret");
-        std::env::set_var("SQLITE_KEY", "testkey");
-        std::env::set_var("DB_PATH", "testdb.db");
-        std::env::set_var("DEFAULT_ADMIN_EMAIL", "admin@test.com");
-        std::env::set_var("DEFAULT_ADMIN_PASSWORD", "admin123");
+        std::env::set_var("DATABASE_URL", "postgres://test");
 
         let config = AppConfig::load();
         assert_eq!(config.host_ip, "127.0.0.9");
@@ -132,9 +112,6 @@ mod tests {
         assert_eq!(config.mqtt_username, "testuser");
         assert_eq!(config.mqtt_password, "testpass");
         assert_eq!(config.jwt_secret, "testsecret");
-        assert_eq!(config.sqlite_key, "testkey");
-        assert_eq!(config.db_path, "testdb.db");
-        assert_eq!(config.default_admin_email, "admin@test.com");
-        assert_eq!(config.default_admin_password, "admin123");
+        assert_eq!(config.database_url, "postgres://test");
     }
 }
