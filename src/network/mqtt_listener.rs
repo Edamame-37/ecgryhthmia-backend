@@ -7,6 +7,7 @@
 use rumqttc::{Client, MqttOptions, QoS, Event, Packet, Transport, TlsConfiguration};
 use std::thread;
 use std::time::Duration;
+use tracing::{info, warn, error};
 
 pub fn start_mqtt_listener<F>(
     broker_host: &str,
@@ -41,7 +42,7 @@ where
     let (client, mut connection) = Client::new(mqttoptions, 10);
     let client_clone = client.clone();
     
-    println!("[MQTT] Mencoba menghubungkan ke Broker {}:{}...", host, broker_port);
+    info!(host = %host, port = broker_port, "Mencoba menghubungkan ke Broker MQTT...");
 
     // Spawn thread khusus agar listener MQTT tidak mengganggu server WebSocket
     thread::spawn(move || {
@@ -49,24 +50,28 @@ where
         for notification in connection.iter() {
             match notification {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                    println!("[MQTT] ✅ Berhasil terhubung secara riil ke Broker HiveMQ Cloud!");
+                    info!("Berhasil terhubung secara riil ke Broker HiveMQ Cloud!");
                     // Resubscribe every time connection is established
                     if let Err(e) = client_clone.subscribe(&topic_name, QoS::AtLeastOnce) {
-                        eprintln!("[MQTT] Gagal mengirim permintaan subscribe: {}", e);
+                        error!(error = %e, topic = %topic_name, "Gagal mengirim permintaan subscribe");
                     }
                 }
                 Ok(Event::Incoming(Packet::SubAck(_))) => {
-                    println!("[MQTT] 📡 Berhasil berlangganan secara resmi ke topik: {}", topic_name);
+                    info!(topic = %topic_name, "Berhasil berlangganan secara resmi ke topik");
                 }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    println!("[MQTT] 📥 Menerima data payload {} bytes dari topik '{}'", publish.payload.len(), publish.topic);
+                    info!(
+                        payload_len = publish.payload.len(),
+                        topic = %publish.topic,
+                        "Menerima data payload dari topik"
+                    );
                     if let Ok(payload_str) = String::from_utf8(publish.payload.to_vec()) {
                         // Teruskan pesan JSON murni ke callback WebSocket
                         on_message(payload_str);
                     }
                 }
                 Err(e) => {
-                    eprintln!("[MQTT] Terputus atau error: {:?}. Mencoba menghubungkan kembali...", e);
+                    warn!(error = ?e, "Koneksi MQTT terputus atau error. Mencoba menghubungkan kembali...");
                     thread::sleep(Duration::from_secs(5));
                 }
                 _ => {}

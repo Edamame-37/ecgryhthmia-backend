@@ -1,9 +1,4 @@
-mod models;
-mod data;
-mod network;
-mod api;
-mod db;
-mod config;
+use ecg_backend::{models, network, api, db, config};
 
 use tracing::{info, error, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -42,14 +37,14 @@ async fn main() {
     let pacer_tx = network::pacer::start_pacer(clients.clone());
 
     // 6. Jalankan Background Database Worker untuk menulis data asinkron
-    let db_tx = db::sqlite::start_db_worker(pool.clone());
+    let db_tx = db::sqlite::start_db_worker(pool.clone(), pacer_tx.clone());
 
     // 7. Load Devices and start MQTT Listeners dynamically
     let mqtt_clients = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     
     {
         if let Ok(conn) = pool.get() {
-            if let Ok(mut stmt) = conn.prepare("SELECT name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices") {
+            if let Ok(mut stmt) = conn.prepare("SELECT name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices WHERE mqtt_broker IS NOT NULL AND mqtt_port IS NOT NULL") {
                 if let Ok(device_iter) = stmt.query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -62,7 +57,6 @@ async fn main() {
                 }) {
                     for device in device_iter {
                         if let Ok((name, broker, port, topic, username, password)) = device {
-                            let pacer_tx_clone = pacer_tx.clone();
                             let db_tx_clone = db_tx.clone();
                             
                             let client = network::mqtt_listener::start_mqtt_listener(
@@ -72,9 +66,17 @@ async fn main() {
                                 &username,
                                 &password,
                                 move |payload_str| {
-                                    if let Ok(device_payload) = serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
-                                        let _ = pacer_tx_clone.send(device_payload.clone());
-                                        let _ = db_tx_clone.send(device_payload);
+                                    match serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
+                                        Ok(device_payload) => {
+                                            let _ = db_tx_clone.send(device_payload);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Gagal mem-parsing payload EKG dari perangkat: {}. Payload: {}",
+                                                e,
+                                                payload_str
+                                            );
+                                        }
                                     }
                                 }
                             );

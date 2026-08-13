@@ -14,7 +14,7 @@ Aplikasi frontend (React/TypeScript) bertanggung jawab untuk dua fungsi utama: m
 ### 2. Pengambilan Data Dataset (REST API)
 - **Koneksi HTTP:** Menggunakan pustaka *fetch* bawaan peramban atau Axios, frontend melakukan *request* HTTP `GET` ke REST API backend di `http://127.0.0.1:8081/api/records`.
 - **Fungsi:** Berguna untuk memuat dan menampilkan daftar ketersediaan file CSV dataset (seperti dari folder Chapman, PTB-XL, atau data simulasi Prosim) pada menu navigasi (sidebar/dropdown) di aplikasi React.
-- **CORS Terintegrasi:** REST API sisi server telah dikonfigurasi untuk mengizinkan *Cross-Origin Resource Sharing (CORS)* untuk semua origin (*Access-Control-Allow-Origin: \**), sehingga *request* langsung dari *dev server* frontend (misalnya `localhost:5173` atau `localhost:3000`) tidak akan diblokir oleh peramban (*browser*).
+- **CORS Terintegrasi:** REST API sisi server telah dikonfigurasi untuk mengizinkan *Cross-Origin Resource Sharing (CORS)* untuk domain produksi (`https://ecgrhythmia.cloud`, `https://www.ecgrhythmia.cloud`) dengan metode (`GET`, `POST`, `PUT`, `DELETE`, `OPTIONS`), header (`Content-Type`, `Authorization`, `Accept`), serta memperbolehkan pengiriman kredensial (*allow credentials*).
 
 ---
 
@@ -77,11 +77,58 @@ Backend aplikasi ini dibangun menggunakan **Rust** dengan framework web asinkron
    ```
    *Catatan:* Jika `REST_PORT` dan `WS_PORT` disamakan (misalnya keduanya `8080`), server Axum akan otomatis menyatu pada satu port tunggal (REST API melayani di `/api` dan WebSocket di `/`).
 
-3. **Build & Run**:
+ 3. **Build & Run**:
    ```bash
    cargo run
    ```
    *Cargo akan mengunduh dependensi (crates), melakukan kompilasi asinkron, menjalankan migrasi database otomatis, dan menyalakan server.*
+
+### 4. Pengujian & Otomatisasi Rilis (Testing & Build Automation)
+
+Aplikasi ini dilengkapi dengan pengujian unit dan pengujian integrasi yang komprehensif untuk menjamin stabilitas sistem sebelum dilakukan kompilasi rilis produksi (build) dan deployment.
+
+#### A. Kategori Pengujian
+1. **Unit Tests (Pengujian Unit):**
+   - **Config Loader (`src/config.rs`):** Memvalidasi pembacaan berkas `.env` dan fallback nilai default jika variabel tidak tersedia.
+   - **CSV Reader (`src/data/csv_reader.rs`):** Memverifikasi pembacaan dataset EKG statis dan penanganan data kosong atau tidak valid (fallback).
+   - **SQLite Database (`src/db/sqlite.rs`):** Menguji migrasi skema tabel database di memori, registrasi admin/device bawaan, serta kebenaran fungsi generator ID kustom (`generate_custom_id`).
+   - **Device Parser (`src/models/device.rs`):** Memverifikasi parsing dan pemetaan JSON payload dari perangkat keras.
+
+2. **Integration Tests (Pengujian Integrasi - `tests/integration_tests.rs`):**
+   - **REST API Integration:** Menyosialisasikan pemanggilan REST API di memori (registrasi, login, dll.) tanpa harus mem-bind socket port riil menggunakan `tower::Service`.
+   - **Database Worker Integration:** Menguji antrean asinkron background writer database worker untuk mencatat sesi secara persisten dan membuat file JSONL rekaman.
+   - **ECG Pacer Integration:** Memverifikasi pembagian data (slicing) signal EKG dan broadcast via WebSocket klien.
+
+#### B. Menjalankan Pengujian Manual
+- **Di Windows (PowerShell):**
+  ```powershell
+  $env:OPENSSL_DIR="d:\Project\ecgrhythmia-backend\openssl-custom"; $env:OPENSSL_STATIC="1"; cargo test
+  ```
+- **Di Linux (Terminal):**
+  ```bash
+  cargo test
+  ```
+
+#### C. Pengujian Otomatis Sebelum Build & Deploy (Sangat Direkomendasikan)
+Untuk menjamin tidak ada kode rusak yang masuk ke tahap kompilasi rilis, kami menyediakan skrip otomatisasi **`test_and_build.ps1`** (Windows) dan **`test_and_build.sh`** (Linux). Skrip ini akan melakukan hal berikut secara berurutan:
+1. Menjalankan seluruh pengujian unit & integrasi.
+2. Menganalisis log hasil uji dan **melampirkan laporan jumlah test yang berhasil (passed) dan gagal (failed)** pada konsol.
+3. **Jika ada pengujian yang gagal (atau terjadi error kompilasi):** Skrip akan langsung menghentikan proses (*abort*) untuk mencegah pembangunan biner yang rusak.
+4. **Jika seluruh pengujian lolos:** Skrip melanjutkan dengan mengompilasi biner produksi teroptimasi menggunakan `cargo build --release`.
+
+##### Cara Menjalankan:
+- **Di Windows (PowerShell):**
+  ```powershell
+  .\test_and_build.ps1
+  ```
+  Output biner produksi (`.exe`) akan tersedia di `target\release\ecg-backend.exe`.
+
+- **Di Linux (Terminal):**
+  ```bash
+  chmod +x test_and_build.sh
+  ./test_and_build.sh
+  ```
+  Output biner produksi akan tersedia di `target/release/ecg-backend`.
 
 ---
 

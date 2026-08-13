@@ -66,10 +66,11 @@ pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str
         CREATE TABLE IF NOT EXISTS devices (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            mac TEXT,
-            battery INTEGER,
-            status TEXT,
-            assigned_to TEXT
+            mqtt_broker TEXT,
+            mqtt_port INTEGER,
+            mqtt_topic TEXT,
+            mqtt_username TEXT,
+            mqtt_password TEXT
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -109,9 +110,20 @@ pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str
     let _ = conn.execute("ALTER TABLE devices DROP COLUMN battery;", params![]);
     let _ = conn.execute("ALTER TABLE devices DROP COLUMN status;", params![]);
     let _ = conn.execute("ALTER TABLE devices DROP COLUMN assigned_to;", params![]);
+
+    // Migrasi kolom baru untuk detail koneksi broker
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_broker TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_port INTEGER;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_topic TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_username TEXT;", params![]);
+    let _ = conn.execute("ALTER TABLE devices ADD COLUMN mqtt_password TEXT;", params![]);
     
     let _ = conn.execute(
-        "INSERT OR IGNORE INTO devices (id, name) VALUES ('dev_001', 'device01');",
+        "INSERT OR IGNORE INTO devices (id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password) VALUES ('dev_001', 'device01', '93d81a02c1f743b6ab4ea22d7ad9c3e0.s1.eu.hivemq.cloud', 8883, 'ecgrhythmia/device01', 'ecg-undip', 'undipjaya');",
+        params![]
+    );
+    let _ = conn.execute(
+        "UPDATE devices SET mqtt_broker = '93d81a02c1f743b6ab4ea22d7ad9c3e0.s1.eu.hivemq.cloud', mqtt_port = 8883, mqtt_topic = 'ecgrhythmia/device01', mqtt_username = 'ecg-undip', mqtt_password = 'undipjaya' WHERE name = 'device01';",
         params![]
     );
 
@@ -125,7 +137,7 @@ pub fn run_migrations(conn: &Connection, admin_email: &str, admin_password: &str
     Ok(())
 }
 
-pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
+pub fn start_db_worker(pool: DbPool, pacer_tx: UnboundedSender<DevicePayload>) -> UnboundedSender<DevicePayload> {
     let (tx, mut rx) = unbounded_channel::<DevicePayload>();
 
     tokio::spawn(async move {
@@ -133,7 +145,7 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
         let mut device_map: HashMap<String, String> = HashMap::new();
         let mut session_map: HashMap<String, String> = HashMap::new();
 
-        while let Some(payload) = rx.recv().await {
+        while let Some(mut payload) = rx.recv().await {
             let conn = match pool.get() {
                 Ok(c) => c,
                 Err(e) => {
@@ -195,6 +207,9 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
                 new_id
             };
 
+            // Update session_id in payload to use database internal ID (ses_...)
+            payload.session_id = ses_id.clone();
+
             // 3. Tentukan path file berdasarkan internal session_id
             let file_path = format!("records/{}.jsonl", ses_id);
 
@@ -226,6 +241,9 @@ pub fn start_db_worker(pool: DbPool) -> UnboundedSender<DevicePayload> {
                 error!("[Database] Gagal menulis baris ke file {}: {}", file_path, e);
                 continue;
             }
+
+            // 5. Teruskan payload yang sudah diperkaya dengan internal session_id ke Pacer
+            let _ = pacer_tx.send(payload);
         }
     });
 
@@ -246,4 +264,56 @@ pub fn generate_custom_id(conn: &Connection, table: &str, prefix: &str) -> Strin
         }
     }
     format!("{}000000000001", prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_in_memory_db() -> rusqlite::Connection {
+        rusqlite::Connection::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn test_migrations_and_seeding() {
+        let conn = init_in_memory_db();
+        let res = run_migrations(&conn, "admin@test.com", "password123");
+        assert!(res.is_ok());
+
+        // Check if admin account was inserted
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM accounts WHERE email = 'admin@test.com'",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(count, 1);
+
+        // Check if default device was inserted
+        let dev_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM devices WHERE name = 'device01'",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(dev_count, 1);
+    }
+
+    #[test]
+    fn test_id_generation() {
+        let conn = init_in_memory_db();
+        run_migrations(&conn, "admin@test.com", "password123").unwrap();
+
+        // Initially no sessions, should generate prefix + 000000000001
+        let id1 = generate_custom_id(&conn, "sessions", "ses");
+        assert_eq!(id1, "ses000000000001");
+
+        // Insert a session with this ID
+        conn.execute(
+            "INSERT INTO sessions (id, device_id, started_at, file_path) VALUES (?1, 'dev_001', '2026-08-10', 'test.jsonl')",
+            params![id1]
+        ).unwrap();
+
+        // Next ID should be ses000000000002
+        let id2 = generate_custom_id(&conn, "sessions", "ses");
+        assert_eq!(id2, "ses000000000002");
+    }
 }
