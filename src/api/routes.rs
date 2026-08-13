@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as base64_engine};
-use crate::db::postgres::generate_custom_id;
 use jsonwebtoken::{decode, Algorithm, Validation, DecodingKey};
 use sqlx::PgPool;
 use axum::{
@@ -300,8 +299,8 @@ async fn get_admin_users_handler(
 
 async fn impersonate_handler(
     _claims: AdminClaims,
-    State(state): State<AppState>,
-    AxumPath(target_id): AxumPath<String>,
+    State(_state): State<AppState>,
+    AxumPath(_target_id): AxumPath<String>,
 ) -> impl IntoResponse {
     // Note: Since we no longer generate JWTs, impersonation might need to be handled differently.
     // For now, we return a mock token if impersonation is truly needed, or we disable it.
@@ -310,8 +309,8 @@ async fn impersonate_handler(
 
 async fn doctor_impersonate_handler(
     claims: UserClaims,
-    State(state): State<AppState>,
-    AxumPath(target_id): AxumPath<String>,
+    State(_state): State<AppState>,
+    AxumPath(_target_id): AxumPath<String>,
 ) -> impl IntoResponse {
     if claims.0.role != "dokter" {
         return (StatusCode::FORBIDDEN, Json(AuthResponse { success: false, message: "Hanya dokter yang dapat melakukan impersonasi".into(), user_id: None, role: None, token: None }));
