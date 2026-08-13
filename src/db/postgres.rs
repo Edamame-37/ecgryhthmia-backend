@@ -15,73 +15,20 @@ pub async fn create_pool(database_url: &str) -> PgPool {
 }
 
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let create_tables_query = "
-        CREATE TABLE IF NOT EXISTS accounts (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            role TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            profile_photo TEXT,
-            status TEXT DEFAULT 'Offline'
-        );
+    let queries = [
+        "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, role TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, profile_photo TEXT, status TEXT DEFAULT 'Offline')",
+        "CREATE TABLE IF NOT EXISTS doctors (id TEXT PRIMARY KEY, account_id TEXT REFERENCES accounts(id), first_name TEXT NOT NULL, last_name TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS patients (id TEXT PRIMARY KEY, account_id TEXT REFERENCES accounts(id), first_name TEXT NOT NULL, last_name TEXT NOT NULL, date_of_birth TEXT NOT NULL, gender TEXT, primary_doctor_id TEXT REFERENCES doctors(id), device_id TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, mqtt_broker TEXT, mqtt_port INTEGER, mqtt_topic TEXT, mqtt_username TEXT, mqtt_password TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id), patient_id TEXT NOT NULL REFERENCES patients(id), started_at TIMESTAMP WITH TIME ZONE NOT NULL, ended_at TIMESTAMP WITH TIME ZONE, file_path TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS frame_records (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, time_interval TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), start_time DOUBLE PRECISION NOT NULL, end_time DOUBLE PRECISION NOT NULL, label TEXT NOT NULL, notes TEXT, created_by TEXT REFERENCES accounts(id), created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)"
+    ];
 
-        CREATE TABLE IF NOT EXISTS doctors (
-            id TEXT PRIMARY KEY,
-            account_id TEXT REFERENCES accounts(id),
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS patients (
-            id TEXT PRIMARY KEY,
-            account_id TEXT REFERENCES accounts(id),
-            primary_doctor_id TEXT REFERENCES doctors(id),
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL,
-            date_of_birth TEXT NOT NULL,
-            gender TEXT NOT NULL,
-            device_id TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS devices (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            mqtt_broker TEXT,
-            mqtt_port INT,
-            mqtt_topic TEXT,
-            mqtt_username TEXT,
-            mqtt_password TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL REFERENCES devices(id),
-            patient_id TEXT REFERENCES patients(id),
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            file_path TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS frame_records (
-            id TEXT PRIMARY KEY,
-            session_id TEXT REFERENCES sessions(id),
-            time_interval TEXT NOT NULL
-        );
-    ";
-
-    sqlx::query(create_tables_query).execute(pool).await?;
-
-    let _ = sqlx::query(
-        "INSERT INTO devices (id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password)
-         VALUES ('dev_001', 'device01', '93d81a02c1f743b6ab4ea22d7ad9c3e0.s1.eu.hivemq.cloud', 8883, 'ecgrhythmia/device01', 'ecg-undip', 'undipjaya')
-         ON CONFLICT (id) DO UPDATE SET 
-            mqtt_broker = EXCLUDED.mqtt_broker, 
-            mqtt_port = EXCLUDED.mqtt_port, 
-            mqtt_topic = EXCLUDED.mqtt_topic, 
-            mqtt_username = EXCLUDED.mqtt_username, 
-            mqtt_password = EXCLUDED.mqtt_password;"
-    ).execute(pool).await?;
-
+    for q in queries.iter() {
+        sqlx::query(*q).execute(pool).await?;
+    }
+    
     Ok(())
 }
 
