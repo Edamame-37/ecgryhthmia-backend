@@ -377,6 +377,47 @@ async fn impersonate_handler(
     }
 }
 
+async fn doctor_impersonate_handler(
+    claims: UserClaims,
+    State(state): State<AppState>,
+    AxumPath(target_id): AxumPath<String>,
+) -> impl IntoResponse {
+    if claims.0.role != "dokter" {
+        return (StatusCode::FORBIDDEN, Json(AuthResponse { success: false, message: "Hanya dokter yang dapat melakukan impersonasi".into(), user_id: None, role: None, token: None }));
+    }
+
+    let conn = match state.pool.get() {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthResponse { success: false, message: "Database Error".into(), user_id: None, role: None, token: None })),
+    };
+    
+    let query = "
+        SELECT a.id, a.role 
+        FROM accounts a
+        JOIN patients p ON p.account_id = a.id
+        WHERE p.id = ?1
+    ";
+    
+    match conn.query_row(query, rusqlite::params![target_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        Ok((account_id, role)) => {
+            let token = create_jwt(&account_id, &role, &state.jwt_secret);
+            let res = AuthResponse {
+                success: true,
+                message: "Impersonation successful".into(),
+                user_id: Some(target_id),
+                role: Some(role),
+                token: Some(token),
+            };
+            (StatusCode::OK, Json(res))
+        },
+        Err(_) => {
+            (StatusCode::NOT_FOUND, Json(AuthResponse { success: false, message: "Pasien tidak ditemukan".into(), user_id: None, role: None, token: None }))
+        }
+    }
+}
+
 async fn get_patients_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -1283,6 +1324,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/patients/:patient_id/disconnect", post(disconnect_patient_handler))
         .route("/api/doctors/:doctor_id/patients", get(get_doctor_patients_handler))
         .route("/api/doctors/:doctor_id", get(get_doctor_profile_handler).put(update_doctor_profile_handler))
+        .route("/api/doctors/impersonate/:target_id", post(doctor_impersonate_handler))
         .route("/api/records/:session_id", get(get_record_handler))
         .route("/api/devices/:device_id/command", post(device_command_handler))
         .route("/api/devices/:device_id/assign", post(assign_device_handler))
