@@ -646,7 +646,8 @@ async fn device_command_handler(
     let clients = state.mqtt_clients.read().await;
     
     if let Some(client) = clients.get(&device_id) {
-        if let Err(e) = client.clone().publish(&topic, rumqttc::QoS::AtLeastOnce, false, cmd.command.clone()) {
+        let payload = serde_json::to_string(&cmd).unwrap_or_else(|_| cmd.command.clone());
+        if let Err(e) = client.clone().publish(&topic, rumqttc::QoS::AtLeastOnce, false, payload) {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": format!("Gagal mengirim perintah: {}", e)})))
         } else {
             info!(device_id = %device_id, topic = %topic, command = %cmd.command, "Berhasil mengirim perintah MQTT ke perangkat");
@@ -941,7 +942,7 @@ async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileReque
 }
 
 fn read_jsonl_file(session_id: &str) -> String {
-    let file_path = format!("records/{}.jsonl", session_id);
+    let file_path = format!("records_local/{}.jsonl", session_id);
     let fallback_path = format!("records/records_local/{}.jsonl", session_id);
     if let Ok(contents) = fs::read_to_string(&file_path) {
         let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();

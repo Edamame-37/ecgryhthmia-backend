@@ -103,10 +103,10 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
             let ses_id = if let Some(id) = session_map.get(&payload.session_id) {
                 id.clone()
             } else {
-                let new_id = generate_custom_id(&pool, "sessions", "ses").await;
+                let new_id = uuid::Uuid::new_v4().to_string();
                 session_map.insert(payload.session_id.clone(), new_id.clone());
                 
-                let initial_file_path = format!("records/{}.jsonl", new_id);
+                let initial_file_path = format!("records_local/{}.jsonl", new_id);
                 
                 let patient_res = sqlx::query!("SELECT id FROM patients WHERE device_id = $1", dev_id)
                     .fetch_one(&pool)
@@ -124,7 +124,7 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
             };
 
             payload.session_id = ses_id.clone();
-            let file_path = format!("records/{}.jsonl", ses_id);
+            let file_path = format!("records_local/{}.jsonl", ses_id);
 
             let json_string = match serde_json::to_string(&payload) {
                 Ok(val) => val,

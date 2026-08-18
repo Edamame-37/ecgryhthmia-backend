@@ -61,12 +61,22 @@ where
                 }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
                     if let Ok(payload_str) = String::from_utf8(publish.payload.to_vec()) {
-                        info!(
-                            payload_len = publish.payload.len(),
-                            topic = %publish.topic,
-                            payload = %payload_str,
-                            "Menerima data payload dari topik"
-                        );
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                            let device_id = json["device_id"].as_str().unwrap_or("-");
+                            let frame_id = json["frame_id"].as_str().unwrap_or("-");
+                            let hr = json["heart_rate"].as_f64().unwrap_or(0.0);
+                            let status = json["clinical_status"].as_str().unwrap_or("-");
+                            info!(
+                                device_id = device_id,
+                                frame_id = frame_id,
+                                heart_rate = hr,
+                                clinical_status = status,
+                                "Menerima paket sensor EKG"
+                            );
+                        } else {
+                            info!("Menerima paket sensor EKG (Invalid JSON format)");
+                        }
+                        
                         // Teruskan pesan JSON murni ke callback WebSocket
                         on_message(payload_str);
                     } else {
