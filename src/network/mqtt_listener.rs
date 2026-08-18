@@ -60,14 +60,21 @@ where
                     info!(topic = %topic_name, "Berhasil berlangganan secara resmi ke topik");
                 }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    info!(
-                        payload_len = publish.payload.len(),
-                        topic = %publish.topic,
-                        "Menerima data payload dari topik"
-                    );
                     if let Ok(payload_str) = String::from_utf8(publish.payload.to_vec()) {
+                        info!(
+                            payload_len = publish.payload.len(),
+                            topic = %publish.topic,
+                            payload = %payload_str,
+                            "Menerima data payload dari topik"
+                        );
                         // Teruskan pesan JSON murni ke callback WebSocket
                         on_message(payload_str);
+                    } else {
+                        info!(
+                            payload_len = publish.payload.len(),
+                            topic = %publish.topic,
+                            "Menerima data payload dari topik (bukan format teks)"
+                        );
                     }
                 }
                 Err(e) => {

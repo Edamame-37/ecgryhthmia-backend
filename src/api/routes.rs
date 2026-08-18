@@ -632,12 +632,24 @@ async fn device_command_handler(
         }
     }
 
-    let topic = format!("ecgrhythmia/{}/command", device_id);
+    // Query mqtt_topic from db
+    let db_topic_record = sqlx::query!("SELECT mqtt_topic FROM devices WHERE id = $1", device_id)
+        .fetch_one(&state.pool).await.ok();
+        
+    let base_topic = if let Some(record) = db_topic_record {
+        record.mqtt_topic.unwrap_or_else(|| format!("ecgrhythmia/{}", device_id))
+    } else {
+        format!("ecgrhythmia/{}", device_id)
+    };
+    
+    let topic = format!("{}/command", base_topic);
     let clients = state.mqtt_clients.read().await;
+    
     if let Some(client) = clients.get(&device_id) {
-        if let Err(e) = client.clone().publish(topic, rumqttc::QoS::AtLeastOnce, false, cmd.command) {
+        if let Err(e) = client.clone().publish(&topic, rumqttc::QoS::AtLeastOnce, false, cmd.command.clone()) {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": format!("Gagal mengirim perintah: {}", e)})))
         } else {
+            info!(device_id = %device_id, topic = %topic, command = %cmd.command, "Berhasil mengirim perintah MQTT ke perangkat");
             (StatusCode::OK, Json(serde_json::json!({"success": true})))
         }
     } else {
