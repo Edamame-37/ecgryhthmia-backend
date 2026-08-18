@@ -942,7 +942,7 @@ async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileReque
 }
 
 fn read_jsonl_file(session_id: &str) -> String {
-    let file_path = format!("records_local/{}.jsonl", session_id);
+    let file_path = format!("records/{}.jsonl", session_id);
     let fallback_path = format!("records/records_local/{}.jsonl", session_id);
     if let Ok(contents) = fs::read_to_string(&file_path) {
         let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();

@@ -69,6 +69,7 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
         let mut device_map: HashMap<String, String> = HashMap::new();
         let mut session_map: HashMap<String, String> = HashMap::new();
         let mut ended_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut session_frame_counts: HashMap<String, i64> = HashMap::new();
 
         while let Some(mut payload) = rx.recv().await {
             // 0. Abaikan payload dari sesi yang sudah di-stop
@@ -112,7 +113,7 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
                 let new_id = generate_custom_id(&pool, "sessions", "ses").await;
                 session_map.insert(payload.session_id.clone(), new_id.clone());
                 
-                let initial_file_path = format!("records_local/{}.jsonl", new_id);
+                let initial_file_path = format!("records/{}.jsonl", new_id);
                 
                 let patient_res = sqlx::query!("SELECT id FROM patients WHERE device_id = $1", dev_id)
                     .fetch_one(&pool)
@@ -130,8 +131,9 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
             };
 
             // 2.5 Periksa status 'ended_at' secara berkala
-            let frame_num = payload.frame_id.parse::<i64>().unwrap_or(1);
-            if frame_num % 10 == 0 {
+            // 2.5 Periksa status 'ended_at' secara berkala
+            let raw_frame_num = payload.frame_id.parse::<i64>().unwrap_or(1);
+            if raw_frame_num % 10 == 0 {
                 if let Ok(Some(record)) = sqlx::query!("SELECT ended_at FROM sessions WHERE id = $1", ses_id).fetch_optional(&pool).await {
                     if record.ended_at.is_some() {
                         ended_sessions.insert(payload.session_id.clone()); // add original session ID to block list
@@ -140,8 +142,23 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
                 }
             }
 
+            // Hitung ulang frame_id mulai dari 1 untuk sesi ini
+            let count = session_frame_counts.entry(ses_id.clone()).or_insert(1);
+            payload.frame_id = format!("{:06}", count);
+            *count += 1;
+
+            let label = &payload.prediction.label;
+            let status = &payload.prediction.status;
+            info!(
+                device_id = %payload.device_id,
+                frame_id = %payload.frame_id,
+                prediction_label = %label,
+                status = %status,
+                "Menerima paket sensor EKG"
+            );
+
             payload.session_id = ses_id.clone();
-            let file_path = format!("records_local/{}.jsonl", ses_id);
+            let file_path = format!("records/{}.jsonl", ses_id);
 
             let json_string = match serde_json::to_string(&payload) {
                 Ok(val) => val,
