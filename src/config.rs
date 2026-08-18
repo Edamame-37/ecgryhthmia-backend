@@ -12,7 +12,7 @@ pub struct AppConfig {
     pub mqtt_topic: String,
     pub mqtt_username: String,
     pub mqtt_password: String,
-    pub jwt_secret: String,
+    pub supabase_jwt_secret: String,
     pub database_url: String,
 }
 
@@ -22,52 +22,52 @@ impl AppConfig {
 
         let host_ip = env::var("HOST_IP")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .unwrap_or_else(|| "127.0.0.1".to_string());
         let rest_port = env::var("REST_PORT")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .unwrap_or_else(|| "8081".to_string());
         let ws_port = env::var("WS_PORT")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .unwrap_or_else(|| "8080".to_string());
         
         let mqtt_broker = env::var("MQTT_BROKER")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .expect("[Config] ERROR: MQTT_BROKER belum diset di .env!");
         
         let mqtt_port = env::var("MQTT_PORT")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .unwrap_or_else(|| "8883".to_string())
             .parse::<u16>()
             .unwrap_or(8883);
             
         let mqtt_topic = env::var("MQTT_TOPIC")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .expect("[Config] ERROR: MQTT_TOPIC belum diset di .env!");
             
         let mqtt_username = env::var("MQTT_USERNAME")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .expect("[Config] ERROR: MQTT_USERNAME belum diset di .env!");
             
         let mqtt_password = env::var("MQTT_PASSWORD")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .expect("[Config] ERROR: MQTT_PASSWORD belum diset di .env!");
         
-        let jwt_secret = env::var("JWT_SECRET")
+        let supabase_jwt_secret = env::var("SUPABASE_JWT_SECRET")
             .ok()
-            .filter(|s| !s.is_empty())
-            .expect("[Config] ERROR: JWT_SECRET belum diset di .env!");
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
+            .expect("[Config] ERROR: SUPABASE_JWT_SECRET belum diset di .env!");
             
         let database_url = env::var("DATABASE_URL")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
             .expect("[Config] ERROR: DATABASE_URL belum diset di .env!");
 
         AppConfig {
@@ -79,7 +79,7 @@ impl AppConfig {
             mqtt_topic,
             mqtt_username,
             mqtt_password,
-            jwt_secret,
+            supabase_jwt_secret,
             database_url,
         }
     }
@@ -99,7 +99,7 @@ mod tests {
         std::env::set_var("MQTT_TOPIC", "test/topic");
         std::env::set_var("MQTT_USERNAME", "testuser");
         std::env::set_var("MQTT_PASSWORD", "testpass");
-        std::env::set_var("JWT_SECRET", "testsecret");
+        std::env::set_var("SUPABASE_JWT_SECRET", "testsecret");
         std::env::set_var("DATABASE_URL", "postgres://test");
 
         let config = AppConfig::load();
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(config.mqtt_topic, "test/topic");
         assert_eq!(config.mqtt_username, "testuser");
         assert_eq!(config.mqtt_password, "testpass");
-        assert_eq!(config.jwt_secret, "testsecret");
+        assert_eq!(config.supabase_jwt_secret, "testsecret");
         assert_eq!(config.database_url, "postgres://test");
     }
 }

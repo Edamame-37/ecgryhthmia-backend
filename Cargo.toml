@@ -24,11 +24,12 @@ base64 = "0.21"
 jsonwebtoken = "9.3"
 dotenvy = "0.15"
 tokio = { version = "1.35", features = ["full"] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 futures-util = "0.3"
+bcrypt = "0.19.3"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
@@ -39,6 +40,4 @@ lto = true
 strip = true
 codegen-units = 1
 
-[[bin]]
-name = "migrate"
-path = "src/migrate.rs"
+

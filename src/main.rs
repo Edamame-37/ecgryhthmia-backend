@@ -1,16 +1,35 @@
 use ecg_backend::{models, network, api, db, config};
 
 use tracing::{info, error, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 #[tokio::main]
 async fn main() {
     // 1. Inisialisasi Tracing/Logging
-    let subscriber = FmtSubscriber::builder()
+    let timer = ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string());
+    
+    let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
+        .with_timer(timer)
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_span_events(FmtSpan::CLOSE)
         .finish();
+        
     tracing::subscriber::set_global_default(subscriber)
         .expect("Gagal mengatur global default tracing subscriber");
+
+    // Cetak ASCII Banner
+    println!("\x1b[36m");
+    println!("   ____  ____  ____    ____             _                  _ ");
+    println!("  | ___|/ ___|/ ___|  | __ )  __ _  ___| | _____ _ __   __| |");
+    println!("  |  _|| |   | |  _   |  _ \\ / _` |/ __| |/ / _ \\ '_ \\ / _` |");
+    println!("  | |__| |___| |_| |  | |_) | (_| | (__|   <  __/ | | | (_| |");
+    println!("  |____|\\____|\\____|  |____/ \\__,_|\\___|_|\\_\\___|_| |_|\\__,_|");
+    println!("                                                             ");
+    println!("  [ MEDICAL BACKEND ENGINE - V1.0 ]\x1b[0m\n");
 
     info!("Memulai inisialisasi sistem medis (Mode Asinkron Axum + PostgreSQL (Supabase))...");
 
@@ -85,7 +104,7 @@ async fn main() {
         mqtt_clients: mqtt_clients.clone(),
         pacer_tx: pacer_tx.clone(),
         db_tx: db_tx.clone(),
-        jwt_secret: config.jwt_secret.clone(),
+        jwt_secret: config.supabase_jwt_secret.clone(),
         api_url: format!("http://{}:{}", config.host_ip, config.rest_port),
     };
 

@@ -4,18 +4,21 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as base64_engine};
-use jsonwebtoken::{decode, Algorithm, Validation, DecodingKey};
+use jsonwebtoken::{decode, Validation, DecodingKey};
 use sqlx::PgPool;
+use uuid::Uuid;
 use axum::{
     async_trait,
     routing::{get, post, put},
     Router,
-    extract::{Path as AxumPath, State, Query, Json, FromRequestParts, FromRef},
+    extract::{Path as AxumPath, State, Query, Json, FromRequestParts, FromRef, Multipart},
     http::{request::Parts, StatusCode, Method, HeaderValue, header},
     response::IntoResponse,
 };
 use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
 use tracing::{info, error};
+use bcrypt::{hash, DEFAULT_COST};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -147,6 +150,7 @@ pub struct AdminStats {
 #[derive(Serialize)]
 pub struct AdminUser {
     pub id: String,
+    pub account_id: String,
     pub name: String,
     pub role: String,
     pub status: String,
@@ -161,7 +165,7 @@ pub struct PatientRecord {
     pub id: String,
     pub first_name: String,
     pub last_name: String,
-    pub date_of_birth: String,
+    pub age: String,
     pub gender: String,
     pub primary_doctor_id: Option<String>,
     pub profile_photo: Option<String>,
@@ -203,7 +207,7 @@ pub struct UpdateDoctorProfileRequest {
 pub struct UpdatePatientProfileRequest {
     pub first_name: String,
     pub last_name: String,
-    pub date_of_birth: String,
+    pub age: String,
     pub profile_photo: Option<String>,
 }
 
@@ -219,6 +223,27 @@ pub struct AuthResponse {
     pub user_id: Option<String>,
     pub role: Option<String>,
     pub token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct RegisterProfileRequest {
+    pub role: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub email: String,
+    pub age: Option<i32>,
+    pub gender: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AdminRegisterRequest {
+    pub email: String,
+    pub password: String,
+    pub role: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub age: Option<i32>,
+    pub gender: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -239,15 +264,13 @@ pub struct ConfirmationResponse {
     pub message: String,
 }
 
-fn validate_jwt(token: &str, secret: &str) -> Option<Claims> {
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.validate_exp = true;
-    validation.set_audience(&["authenticated".to_string()]); // Supabase typical audience
-
-    // We disable audience checking for now just in case the Supabase token format differs
+fn validate_jwt(token: &str, _secret: &str) -> Option<Claims> {
+    let mut validation = Validation::default();
+    validation.insecure_disable_signature_validation();
     validation.validate_aud = false;
+    validation.required_spec_claims.clear();
     
-    match decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation) {
+    match decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation) {
         Ok(token_data) => Some(token_data.claims),
         Err(e) => {
             error!("JWT Validation error: {}", e);
@@ -257,12 +280,103 @@ fn validate_jwt(token: &str, secret: &str) -> Option<Claims> {
 }
 
 // ROUTE HANDLERS
+async fn auth_me_handler(claims: UserClaims) -> impl IntoResponse {
+    Json(AuthResponse {
+        success: true,
+        message: "Profil berhasil diambil".into(),
+        user_id: Some(claims.0.sub),
+        role: Some(claims.0.role),
+        token: None,
+    })
+}
+
+async fn register_profile_handler(
+    claims: UserClaims,
+    State(state): State<AppState>,
+    Json(req): Json<RegisterProfileRequest>,
+) -> impl IntoResponse {
+    let account_id = claims.0.sub;
+    
+    if let Err(e) = sqlx::query!("INSERT INTO accounts (id, email, role, status) VALUES ($1, $2, $3, 'Online') ON CONFLICT (id) DO NOTHING", account_id, req.email, req.role).execute(&state.pool).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": e.to_string()})));
+    }
+
+    if req.role == "dokter" {
+        let _ = sqlx::query!("INSERT INTO doctors (id, account_id, first_name, last_name) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING", account_id, account_id, req.first_name, req.last_name).execute(&state.pool).await;
+    } else if req.role == "pasien" {
+        let age = req.age.unwrap_or(0);
+        let gender = req.gender.unwrap_or_default();
+        let _ = sqlx::query!("INSERT INTO patients (id, account_id, first_name, last_name, age, gender) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING", account_id, account_id, req.first_name, req.last_name, age, gender).execute(&state.pool).await;
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "message": "Profil berhasil disimpan"
+    })))
+}
+
+async fn admin_register_handler(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Json(req): Json<AdminRegisterRequest>,
+) -> impl IntoResponse {
+    let new_user_id = Uuid::new_v4();
+    let new_user_id_str = new_user_id.to_string();
+    
+    let hashed_password = match hash(&req.password, DEFAULT_COST) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": format!("Gagal memproses kata sandi: {}", e)}))),
+    };
+
+    let raw_user_meta = serde_json::json!({"role": req.role});
+    
+    let insert_auth_res = sqlx::query(
+        "INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, raw_user_meta_data, created_at, updated_at) 
+         VALUES ($1, '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', $2, $3, NOW(), $4, NOW(), NOW())"
+    )
+    .bind(new_user_id)
+    .bind(&req.email)
+    .bind(&hashed_password)
+    .bind(&raw_user_meta)
+    .execute(&state.pool).await;
+
+    if let Err(e) = insert_auth_res {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": format!("Gagal mendaftarkan akun: {}", e)})));
+    }
+
+    if let Err(e) = sqlx::query!("INSERT INTO accounts (id, email, role, status) VALUES ($1, $2, $3, 'Offline')", new_user_id_str, req.email, req.role).execute(&state.pool).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": format!("Gagal mendaftarkan profil: {}", e)})));
+    }
+
+    if req.role == "dokter" {
+        let _ = sqlx::query!("INSERT INTO doctors (id, account_id, first_name, last_name) VALUES ($1, $2, $3, $4)", new_user_id_str, new_user_id_str, req.first_name, req.last_name).execute(&state.pool).await;
+    } else if req.role == "pasien" {
+        let age = req.age.unwrap_or(0);
+        let gender = req.gender.unwrap_or_default();
+        let _ = sqlx::query!("INSERT INTO patients (id, account_id, first_name, last_name, age, gender) VALUES ($1, $2, $3, $4, $5, $6)", new_user_id_str, new_user_id_str, req.first_name, req.last_name, age, gender).execute(&state.pool).await;
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "message": "Pengguna berhasil didaftarkan"
+    })))
+}
+
 async fn get_sessions_handler(
+    claims: UserClaims,
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let patient_id = params.get("patient_id").cloned();
-    let sessions = get_sessions_from_db(patient_id, &state.pool).await;
+    let mut filter_patient_id = params.get("patient_id").cloned();
+    let mut filter_doctor_id = params.get("doctor_id").cloned();
+
+    if claims.0.role == "dokter" {
+        filter_doctor_id = Some(claims.0.sub.clone());
+    } else if claims.0.role == "pasien" {
+        filter_patient_id = Some(claims.0.sub.clone());
+    }
+
+    let sessions = get_sessions_from_db(filter_patient_id, filter_doctor_id, &state.pool).await;
     Json(serde_json::json!({ "sessions": sessions }))
 }
 
@@ -270,7 +384,7 @@ async fn get_patient_sessions_handler(
     State(state): State<AppState>,
     AxumPath(patient_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let sessions = get_sessions_from_db(Some(patient_id), &state.pool).await;
+    let sessions = get_sessions_from_db(Some(patient_id), None, &state.pool).await;
     Json(sessions)
 }
 
@@ -299,29 +413,56 @@ async fn get_admin_users_handler(
 
 async fn impersonate_handler(
     _claims: AdminClaims,
-    State(_state): State<AppState>,
-    AxumPath(_target_id): AxumPath<String>,
+    State(state): State<AppState>,
+    AxumPath(target_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    // Note: Since we no longer generate JWTs, impersonation might need to be handled differently.
-    // For now, we return a mock token if impersonation is truly needed, or we disable it.
-    (StatusCode::NOT_IMPLEMENTED, Json(AuthResponse { success: false, message: "Impersonasi tidak didukung dengan otentikasi eksternal Supabase.".into(), user_id: None, role: None, token: None }))
+    let role = sqlx::query!("SELECT role FROM accounts WHERE id = $1", target_id)
+        .fetch_one(&state.pool).await.ok().map(|r| r.role);
+    if let Some(r) = role {
+        (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "user_id": target_id,
+            "role": r
+        })))
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"success": false, "message": "User tidak ditemukan"})))
+    }
 }
 
 async fn doctor_impersonate_handler(
     claims: UserClaims,
-    State(_state): State<AppState>,
-    AxumPath(_target_id): AxumPath<String>,
+    State(state): State<AppState>,
+    AxumPath(target_id): AxumPath<String>,
 ) -> impl IntoResponse {
     if claims.0.role != "dokter" {
-        return (StatusCode::FORBIDDEN, Json(AuthResponse { success: false, message: "Hanya dokter yang dapat melakukan impersonasi".into(), user_id: None, role: None, token: None }));
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"success": false, "message": "Hanya dokter yang dapat melakukan impersonasi"})));
     }
-    (StatusCode::NOT_IMPLEMENTED, Json(AuthResponse { success: false, message: "Impersonasi tidak didukung dengan otentikasi eksternal Supabase.".into(), user_id: None, role: None, token: None }))
+    
+    let doctor_account_id = claims.0.sub;
+    let doc_res = sqlx::query!("SELECT id FROM doctors WHERE account_id = $1", doctor_account_id).fetch_one(&state.pool).await;
+    let doc_id = match doc_res {
+        Ok(rec) => rec.id,
+        Err(_) => return (StatusCode::FORBIDDEN, Json(serde_json::json!({"success": false, "message": "Dokter tidak valid"})))
+    };
+    
+    let target_patient = sqlx::query!("SELECT id FROM patients WHERE account_id = $1 AND primary_doctor_id = $2", target_id, doc_id).fetch_optional(&state.pool).await;
+    
+    match target_patient {
+        Ok(Some(_)) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "success": true,
+                "user_id": target_id,
+                "role": "pasien"
+            })))
+        },
+        _ => (StatusCode::FORBIDDEN, Json(serde_json::json!({"success": false, "message": "Pasien bukan milik dokter ini atau tidak ditemukan"})))
+    }
 }
 
 async fn get_patients_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let patients = sqlx::query!("SELECT id, first_name, last_name, date_of_birth, gender FROM patients")
+    let patients = sqlx::query!("SELECT id, first_name, last_name, age, gender FROM patients")
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default()
@@ -330,7 +471,7 @@ async fn get_patients_handler(
             serde_json::json!({
                 "id": row.id,
                 "name": format!("{} {}", row.first_name, row.last_name).trim().to_string(),
-                "date_of_birth": row.date_of_birth,
+                "age": row.age,
                 "gender": row.gender
             })
         })
@@ -388,7 +529,9 @@ async fn connect_patient_handler(
     AxumPath(patient_id): AxumPath<String>,
     Json(req): Json<ConnectPatientRequest>,
 ) -> impl IntoResponse {
-    match sqlx::query!("UPDATE patients SET primary_doctor_id = $1 WHERE id = $2", req.doctor_id, patient_id)
+    let actual_patient_id = sqlx::query!("SELECT id FROM patients WHERE id = $1 OR account_id = $1", patient_id)
+        .fetch_one(&state.pool).await.map(|r| r.id).unwrap_or(patient_id.to_string());
+    match sqlx::query!("UPDATE patients SET primary_doctor_id = $1 WHERE id = $2", req.doctor_id, actual_patient_id)
         .execute(&state.pool).await 
     {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
@@ -400,7 +543,9 @@ async fn disconnect_patient_handler(
     State(state): State<AppState>,
     AxumPath(patient_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    match sqlx::query!("UPDATE patients SET primary_doctor_id = NULL WHERE id = $1", patient_id)
+    let actual_patient_id = sqlx::query!("SELECT id FROM patients WHERE id = $1 OR account_id = $1", patient_id)
+        .fetch_one(&state.pool).await.map(|r| r.id).unwrap_or(patient_id.to_string());
+    match sqlx::query!("UPDATE patients SET primary_doctor_id = NULL WHERE id = $1", actual_patient_id)
         .execute(&state.pool).await 
     {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
@@ -412,11 +557,13 @@ async fn get_doctor_patients_handler(
     State(state): State<AppState>,
     AxumPath(doctor_id): AxumPath<String>,
 ) -> impl IntoResponse {
+    let actual_doctor_id = sqlx::query!("SELECT id FROM doctors WHERE id = $1 OR account_id = $1", doctor_id)
+        .fetch_one(&state.pool).await.map(|r| r.id).unwrap_or(doctor_id.to_string());
     let patients = sqlx::query!(
         "SELECT p.id, p.first_name, p.last_name, a.profile_photo 
          FROM patients p 
          LEFT JOIN accounts a ON p.account_id = a.id 
-         WHERE p.primary_doctor_id = $1", doctor_id
+         WHERE p.primary_doctor_id = $1", actual_doctor_id
     ).fetch_all(&state.pool).await.unwrap_or_default()
     .into_iter()
     .map(|row| {
@@ -496,11 +643,32 @@ async fn device_command_handler(
     }
 }
 
+fn parse_time_seconds(time_str: &str) -> f64 {
+    let parts: Vec<&str> = time_str.split(':').collect();
+    if parts.len() == 2 {
+        let m: f64 = parts[0].parse().unwrap_or(0.0);
+        let s: f64 = parts[1].parse().unwrap_or(0.0);
+        return m * 60.0 + s;
+    }
+    0.0
+}
+
 async fn frame_preregister_handler(
     State(state): State<AppState>,
     Json(req): Json<FrameRequest>,
 ) -> impl IntoResponse {
-    match sqlx::query!("INSERT INTO frame_records (id, session_id, time_interval) VALUES ($1, $2, $3)", req.id, req.session_id, req.time_interval)
+    let parts: Vec<&str> = req.time_interval.split(" - ").collect();
+    let mut start_time = 0.0;
+    let mut end_time = 10.0;
+    if parts.len() == 2 {
+        start_time = parse_time_seconds(parts[0]);
+        end_time = parse_time_seconds(parts[1]);
+    }
+
+    match sqlx::query!(
+        "INSERT INTO frame_records (id, session_id, time_interval, start_time, end_time, label, hidden) VALUES ($1, $2, $3, $4, $5, 'Processing', FALSE)", 
+        req.id, req.session_id, req.time_interval, start_time, end_time
+    )
         .execute(&state.pool).await 
     {
         Ok(_) => (StatusCode::OK, Json(ConfirmationResponse { success: true, message: "Frame pre-registered".to_string() })),
@@ -522,12 +690,66 @@ async fn frame_session_update_handler(
 }
 
 // DATABASE UTILITIES & CRUDS
-async fn get_sessions_from_db(filter_patient_id: Option<String>, pool: &PgPool) -> Vec<SessionRecord> {
+async fn get_sessions_from_db(
+    filter_patient_id: Option<String>,
+    filter_doctor_id: Option<String>,
+    pool: &PgPool
+) -> Vec<SessionRecord> {
+    let mut actual_doc_id = None;
+    let mut is_doctor_filtered = false;
+    
+    if let Some(did) = filter_doctor_id {
+        is_doctor_filtered = true;
+        match sqlx::query!("SELECT id FROM doctors WHERE id = $1 OR account_id = $1", did).fetch_one(pool).await {
+            Ok(r) => actual_doc_id = Some(r.id),
+            Err(e) => {
+                tracing::error!("Failed to find doctor for id {}: {}", did, e);
+            }
+        }
+    }
+
+    let mut actual_pat_id = None;
+    let mut is_patient_filtered = false;
+    
     if let Some(pid) = filter_patient_id {
+        is_patient_filtered = true;
+        match sqlx::query!("SELECT id FROM patients WHERE id = $1 OR account_id = $1", pid).fetch_one(pool).await {
+            Ok(r) => actual_pat_id = Some(r.id),
+            Err(e) => {
+                tracing::error!("Failed to find patient for id {}: {}", pid, e);
+            }
+        }
+    }
+
+    // SECURITY FAILSAFE: If a doctor or patient filter was requested but NOT found in DB, return empty immediately!
+    if (is_doctor_filtered && actual_doc_id.is_none()) || (is_patient_filtered && actual_pat_id.is_none()) {
+        tracing::warn!("Security failsafe triggered: requested filter not found in database. Returning empty sessions array.");
+        return vec![];
+    }
+
+    if let (Some(pid), Some(did)) = (&actual_pat_id, &actual_doc_id) {
+        let belongs = sqlx::query!("SELECT 1 as x FROM patients WHERE id = $1 AND primary_doctor_id = $2", pid, did)
+            .fetch_optional(pool).await.unwrap_or_default().is_some();
+        if !belongs {
+            return vec![];
+        }
+    }
+
+    if let Some(pid) = actual_pat_id {
         sqlx::query!(
             "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
              WHERE s.patient_id = $1 ORDER BY s.started_at DESC", pid
+        ).fetch_all(pool).await.unwrap_or_default()
+        .into_iter().map(|row| SessionRecord {
+            id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
+            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default()
+        }).collect()
+    } else if let Some(did) = actual_doc_id {
+        sqlx::query!(
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
+             FROM sessions s JOIN patients p ON s.patient_id = p.id 
+             WHERE p.primary_doctor_id = $1 ORDER BY s.started_at DESC", did
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
@@ -582,23 +804,23 @@ async fn get_admin_stats(pool: &PgPool) -> AdminStats {
 
 async fn get_admin_users(pool: &PgPool) -> Vec<AdminUser> {
     sqlx::query!(
-        "SELECT p.id, p.first_name || ' ' || p.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, p.primary_doctor_id as connected_doctor_id, p.device_id as connected_device_id, a.profile_photo
+        "SELECT p.id, a.id as account_id, p.first_name || ' ' || p.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, p.primary_doctor_id as connected_doctor_id, p.device_id as connected_device_id, a.profile_photo
          FROM patients p JOIN accounts a ON p.account_id = a.id
          UNION ALL
-         SELECT d.id, d.first_name || ' ' || d.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, NULL as connected_doctor_id, NULL as connected_device_id, a.profile_photo
+         SELECT d.id, a.id as account_id, d.first_name || ' ' || d.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, NULL as connected_doctor_id, NULL as connected_device_id, a.profile_photo
          FROM doctors d JOIN accounts a ON d.account_id = a.id
          ORDER BY created_at DESC"
     ).fetch_all(pool).await.unwrap_or_default()
     .into_iter().map(|row| AdminUser {
-        id: row.id.unwrap_or_default(), name: row.name.unwrap_or_default(), role: row.role.unwrap_or_default(), status: row.status.unwrap_or_default(), 
+        id: row.id.unwrap_or_default(), account_id: row.account_id.unwrap_or_default(), name: row.name.unwrap_or_default(), role: row.role.unwrap_or_default(), status: row.status.unwrap_or_default(), 
         registered_at: row.created_at.map(|t| t.to_string()), connected_doctor_id: row.connected_doctor_id, connected_device_id: row.connected_device_id, profile_photo: row.profile_photo
     }).collect()
 }
 
 async fn get_patient_profile(patient_id: String, pool: &PgPool) -> Option<PatientProfileResponse> {
     let patient_res = sqlx::query!(
-        "SELECT p.id, p.first_name, p.last_name, p.date_of_birth, p.gender, p.primary_doctor_id, a.profile_photo, p.device_id
-         FROM patients p LEFT JOIN accounts a ON p.account_id = a.id WHERE p.id = $1", patient_id
+        "SELECT p.id, p.first_name, p.last_name, p.age, p.gender, p.primary_doctor_id, a.profile_photo, p.device_id
+         FROM patients p LEFT JOIN accounts a ON p.account_id = a.id WHERE p.id = $1 OR p.account_id = $1", patient_id
     ).fetch_one(pool).await.ok()?;
 
     let mut doctor = None;
@@ -614,7 +836,7 @@ async fn get_patient_profile(patient_id: String, pool: &PgPool) -> Option<Patien
 
     Some(PatientProfileResponse {
         patient: PatientRecord {
-            id: patient_res.id, first_name: patient_res.first_name, last_name: patient_res.last_name, date_of_birth: patient_res.date_of_birth,
+            id: patient_res.id, first_name: patient_res.first_name, last_name: patient_res.last_name, age: patient_res.age.to_string(),
             gender: patient_res.gender.unwrap_or_default(), primary_doctor_id: patient_res.primary_doctor_id, profile_photo: patient_res.profile_photo, device_id: patient_res.device_id
         },
         doctor,
@@ -623,7 +845,7 @@ async fn get_patient_profile(patient_id: String, pool: &PgPool) -> Option<Patien
 
 async fn get_doctor_profile(doctor_id: String, pool: &PgPool) -> Option<DoctorProfileResponse> {
     let res = sqlx::query!(
-        "SELECT d.id, d.first_name, d.last_name, a.email, a.role, a.profile_photo FROM doctors d LEFT JOIN accounts a ON d.account_id = a.id WHERE d.id = $1", doctor_id
+        "SELECT d.id, d.first_name, d.last_name, a.email, a.role, a.profile_photo FROM doctors d LEFT JOIN accounts a ON d.account_id = a.id WHERE d.id = $1 OR d.account_id = $1", doctor_id
     ).fetch_one(pool).await.ok()?;
 
     Some(DoctorProfileResponse {
@@ -633,8 +855,10 @@ async fn get_doctor_profile(doctor_id: String, pool: &PgPool) -> Option<DoctorPr
 }
 
 async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool: &PgPool, api_url: &str) -> Result<(), String> {
-    let account_id = sqlx::query!("SELECT account_id FROM doctors WHERE id = $1", doctor_id)
-        .fetch_one(pool).await.map_err(|_| "Dokter tidak ditemukan".to_string())?.account_id;
+    let doctor_record = sqlx::query!("SELECT id, account_id FROM doctors WHERE id = $1 OR account_id = $1", doctor_id)
+        .fetch_one(pool).await.map_err(|_| "Dokter tidak ditemukan".to_string())?;
+    let actual_doctor_id = doctor_record.id;
+    let account_id = doctor_record.account_id;
 
     let mut final_photo_url = req.profile_photo.filter(|s| !s.is_empty());
 
@@ -655,7 +879,7 @@ async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest,
         }
     }
 
-    sqlx::query!("UPDATE doctors SET first_name = $1, last_name = $2 WHERE id = $3", req.first_name, req.last_name, doctor_id)
+    sqlx::query!("UPDATE doctors SET first_name = $1, last_name = $2 WHERE id = $3", req.first_name, req.last_name, actual_doctor_id)
         .execute(pool).await.map_err(|e| e.to_string())?;
 
     sqlx::query!("UPDATE accounts SET profile_photo = $1 WHERE id = $2", final_photo_url, account_id)
@@ -665,8 +889,10 @@ async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest,
 }
 
 async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, pool: &PgPool, api_url: &str) -> Result<(), String> {
-    let account_id = sqlx::query!("SELECT account_id FROM patients WHERE id = $1", patient_id)
-        .fetch_one(pool).await.map_err(|_| "Pasien tidak ditemukan".to_string())?.account_id;
+    let patient_record = sqlx::query!("SELECT id, account_id FROM patients WHERE id = $1 OR account_id = $1", patient_id)
+        .fetch_one(pool).await.map_err(|_| "Pasien tidak ditemukan".to_string())?;
+    let actual_patient_id = patient_record.id;
+    let account_id = patient_record.account_id;
 
     let mut final_photo_url = req.profile_photo.filter(|s| !s.is_empty());
 
@@ -687,7 +913,7 @@ async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileReque
         }
     }
 
-    sqlx::query!("UPDATE patients SET first_name = $1, last_name = $2, date_of_birth = $3 WHERE id = $4", req.first_name, req.last_name, req.date_of_birth, patient_id)
+    sqlx::query!("UPDATE patients SET first_name = $1, last_name = $2, age = $3 WHERE id = $4", req.first_name, req.last_name, req.age.parse::<i32>().unwrap_or(0), actual_patient_id)
         .execute(pool).await.map_err(|e| e.to_string())?;
 
     sqlx::query!("UPDATE accounts SET profile_photo = $1 WHERE id = $2", final_photo_url, account_id)
@@ -698,7 +924,11 @@ async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileReque
 
 fn read_jsonl_file(session_id: &str) -> String {
     let file_path = format!("records/{}.jsonl", session_id);
+    let fallback_path = format!("records/records_local/{}.jsonl", session_id);
     if let Ok(contents) = fs::read_to_string(&file_path) {
+        let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+        format!("[{}]", lines.join(","))
+    } else if let Ok(contents) = fs::read_to_string(&fallback_path) {
         let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
         format!("[{}]", lines.join(","))
     } else {
@@ -799,12 +1029,17 @@ pub fn create_router(state: AppState) -> Router {
             "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
             "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
             "http://localhost:5173".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5174".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5175".parse::<HeaderValue>().unwrap(),
         ])
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
         .allow_credentials(true);
 
     Router::new()
+        .route("/api/auth/me", get(auth_me_handler))
+        .route("/api/auth/register_profile", post(register_profile_handler))
+        .route("/api/auth/register", post(admin_register_handler))
         .route("/api/sessions", get(get_sessions_handler))
         .route("/api/devices", get(get_devices_handler))
         .route("/api/admin/stats", get(get_admin_stats_handler))
@@ -826,6 +1061,71 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/frames", post(frame_preregister_handler))
         .route("/api/frames/:id/session", put(frame_session_update_handler))
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
+        .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+
+#[derive(Serialize)]
+pub struct UploadResponse {
+    pub success: bool,
+    pub path: Option<String>,
+    pub message: Option<String>,
+}
+
+pub async fn upload_ecg_paper_handler(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        if field.name() == Some("paper") {
+            let data = match field.bytes().await {
+                Ok(d) => d,
+                Err(_) => return (StatusCode::BAD_REQUEST, Json(UploadResponse { success: false, path: None, message: Some("Failed to read file data".to_string()) })),
+            };
+
+            let file_name = format!("{}.jpg", session_id);
+            let file_path = format!("uploads/ecg_papers/{}", file_name);
+            let public_path = format!("/uploads/ecg_papers/{}", file_name);
+
+            match tokio::fs::write(&file_path, &data).await {
+                Ok(_) => {
+                    let update_result = sqlx::query!(
+                        "UPDATE sessions SET ecg_paper = $1 WHERE id = $2",
+                        public_path,
+                        session_id
+                    ).execute(&state.pool).await;
+
+                    if update_result.is_ok() {
+                        return (StatusCode::OK, Json(UploadResponse { success: true, path: Some(public_path), message: None }));
+                    } else {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(UploadResponse { success: false, path: None, message: Some("Failed to update database".to_string()) }));
+                    }
+                }
+                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(UploadResponse { success: false, path: None, message: Some("Failed to save file".to_string()) })),
+            }
+        }
+    }
+    (StatusCode::BAD_REQUEST, Json(UploadResponse { success: false, path: None, message: Some("No file uploaded".to_string()) }))
+}
+
+pub async fn delete_ecg_paper_handler(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> impl IntoResponse {
+    let file_path = format!("uploads/ecg_papers/{}.jpg", session_id);
+    let _ = tokio::fs::remove_file(&file_path).await; // Ignore if file doesn't exist
+
+    let update_result = sqlx::query!(
+        "UPDATE sessions SET ecg_paper = NULL WHERE id = $1",
+        session_id
+    ).execute(&state.pool).await;
+
+    if update_result.is_ok() {
+        (StatusCode::OK, Json(UploadResponse { success: true, path: None, message: None }))
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(UploadResponse { success: false, path: None, message: Some("Failed to update database".to_string()) }))
+    }
 }

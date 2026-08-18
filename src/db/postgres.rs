@@ -16,13 +16,18 @@ pub async fn create_pool(database_url: &str) -> PgPool {
 
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     let queries = [
+        
         "CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, role TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, profile_photo TEXT, status TEXT DEFAULT 'Offline')",
-        "CREATE TABLE IF NOT EXISTS doctors (id TEXT PRIMARY KEY, account_id TEXT REFERENCES accounts(id), first_name TEXT NOT NULL, last_name TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS patients (id TEXT PRIMARY KEY, account_id TEXT REFERENCES accounts(id), first_name TEXT NOT NULL, last_name TEXT NOT NULL, date_of_birth TEXT NOT NULL, gender TEXT, primary_doctor_id TEXT REFERENCES doctors(id), device_id TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        
+        "CREATE TABLE IF NOT EXISTS doctors (id TEXT PRIMARY KEY, account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE, first_name TEXT NOT NULL, last_name TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        
+        "CREATE TABLE IF NOT EXISTS patients (id TEXT PRIMARY KEY, account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE, first_name TEXT NOT NULL, last_name TEXT NOT NULL, age INTEGER NOT NULL, gender TEXT, primary_doctor_id TEXT REFERENCES doctors(id) ON DELETE SET NULL, device_id TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        
         "CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, mqtt_broker TEXT, mqtt_port INTEGER, mqtt_topic TEXT, mqtt_username TEXT, mqtt_password TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id), patient_id TEXT NOT NULL REFERENCES patients(id), started_at TIMESTAMP WITH TIME ZONE NOT NULL, ended_at TIMESTAMP WITH TIME ZONE, file_path TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS frame_records (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, time_interval TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
-        "CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), start_time DOUBLE PRECISION NOT NULL, end_time DOUBLE PRECISION NOT NULL, label TEXT NOT NULL, notes TEXT, created_by TEXT REFERENCES accounts(id), created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)"
+        
+        "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE, started_at TIMESTAMP WITH TIME ZONE NOT NULL, ended_at TIMESTAMP WITH TIME ZONE, file_path TEXT, ecg_paper TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
+        
+        "CREATE TABLE IF NOT EXISTS frame_records (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, start_time DOUBLE PRECISION NOT NULL, end_time DOUBLE PRECISION NOT NULL, time_interval TEXT NOT NULL, label TEXT NOT NULL, dev_note TEXT, doc_note TEXT, confirmation BOOLEAN DEFAULT FALSE, doc_classification TEXT, hidden BOOLEAN DEFAULT FALSE, created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)"
     ];
 
     for q in queries.iter() {
@@ -148,9 +153,47 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
                 continue;
             }
 
+            // Update database classification label dynamically
+            let duration_s = payload.duration_s;
+            let frame_num = payload.frame_id.parse::<i64>().unwrap_or(1);
+            let start_sec = (frame_num - 1) as f64 * duration_s;
+            let end_sec = frame_num as f64 * duration_s;
+            
+            let format_time = |secs: f64| -> String {
+                let m = (secs / 60.0).floor() as i64;
+                let s = (secs % 60.0).floor() as i64;
+                format!("{:02}:{:02}", m, s)
+            };
+            
+            let time_interval = format!("{} - {}", format_time(start_sec), format_time(end_sec));
+            
+            let mut best_label = "Normal".to_string();
+            if let Some(probs) = &payload.prediction.probabilities {
+                if let Some(obj) = probs.as_object() {
+                    let mut max_prob = -1.0;
+                    for (k, v) in obj {
+                        if let Some(p) = v.as_f64() {
+                            if p > max_prob {
+                                max_prob = p;
+                                best_label = k.clone();
+                            }
+                        }
+                    }
+                }
+            } else {
+                best_label = payload.prediction.label.clone();
+            }
+
+            let _ = sqlx::query!(
+                "UPDATE frame_records SET label = $1 WHERE session_id = $2 AND time_interval = $3",
+                best_label, ses_id, time_interval
+            ).execute(&pool).await;
+
             let _ = pacer_tx.send(payload);
         }
     });
 
     tx
 }
+
+
