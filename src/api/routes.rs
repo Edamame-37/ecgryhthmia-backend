@@ -11,7 +11,7 @@ use axum::{
     async_trait,
     routing::{get, post, put},
     Router,
-    extract::{Path as AxumPath, State, Query, Json, FromRequestParts, FromRef, Multipart},
+    extract::{Path as AxumPath, State, Query, Json, FromRequestParts, FromRef, Multipart, DefaultBodyLimit},
     http::{request::Parts, StatusCode, Method, HeaderValue, header},
     response::IntoResponse,
 };
@@ -127,6 +127,7 @@ pub struct SessionRecord {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub file_path: String,
+    pub ecg_paper: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -737,33 +738,36 @@ async fn get_sessions_from_db(
 
     if let Some(pid) = actual_pat_id {
         sqlx::query!(
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
              WHERE s.patient_id = $1 ORDER BY s.started_at DESC", pid
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
-            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default()
+            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
+            ecg_paper: row.ecg_paper
         }).collect()
     } else if let Some(did) = actual_doc_id {
         sqlx::query!(
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
              FROM sessions s JOIN patients p ON s.patient_id = p.id 
              WHERE p.primary_doctor_id = $1 ORDER BY s.started_at DESC", did
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
-            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default()
+            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
+            ecg_paper: row.ecg_paper
         }).collect()
     } else {
         sqlx::query!(
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path 
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
              ORDER BY s.started_at DESC"
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
-            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default()
+            started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
+            ecg_paper: row.ecg_paper
         }).collect()
     }
 }
@@ -1062,6 +1066,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/frames", post(frame_preregister_handler))
         .route("/api/frames/:id/session", put(frame_session_update_handler))
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
