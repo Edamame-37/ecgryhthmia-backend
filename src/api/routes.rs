@@ -1066,7 +1066,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/frames", post(frame_preregister_handler))
         .route("/api/frames/:id/session", put(frame_session_update_handler))
         .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
