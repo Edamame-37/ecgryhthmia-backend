@@ -1087,7 +1087,17 @@ pub async fn upload_ecg_paper_handler(
                 Err(_) => return (StatusCode::BAD_REQUEST, Json(UploadResponse { success: false, path: None, message: Some("Failed to read file data".to_string()) })),
             };
 
-            let file_name = format!("{}.jpg", session_id);
+            // Hapus file lama jika ada
+            if let Ok(record) = sqlx::query!("SELECT ecg_paper FROM sessions WHERE id = $1", session_id).fetch_one(&state.pool).await {
+                if let Some(old_path) = record.ecg_paper {
+                    if let Some(filename) = old_path.split('/').last() {
+                        let old_file_path = format!("uploads/ecg_papers/{}", filename);
+                        let _ = tokio::fs::remove_file(&old_file_path).await;
+                    }
+                }
+            }
+
+            let file_name = format!("{}_{}.jpg", session_id, uuid::Uuid::new_v4());
             let file_path = format!("uploads/ecg_papers/{}", file_name);
             let public_path = format!("/uploads/ecg_papers/{}", file_name);
 
@@ -1116,8 +1126,15 @@ pub async fn delete_ecg_paper_handler(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let file_path = format!("uploads/ecg_papers/{}.jpg", session_id);
-    let _ = tokio::fs::remove_file(&file_path).await; // Ignore if file doesn't exist
+    // Hapus file lama jika ada
+    if let Ok(record) = sqlx::query!("SELECT ecg_paper FROM sessions WHERE id = $1", session_id).fetch_one(&state.pool).await {
+        if let Some(old_path) = record.ecg_paper {
+            if let Some(filename) = old_path.split('/').last() {
+                let old_file_path = format!("uploads/ecg_papers/{}", filename);
+                let _ = tokio::fs::remove_file(&old_file_path).await;
+            }
+        }
+    }
 
     let update_result = sqlx::query!(
         "UPDATE sessions SET ecg_paper = NULL WHERE id = $1",
