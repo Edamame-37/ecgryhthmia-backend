@@ -1056,6 +1056,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/doctors/:doctor_id", get(get_doctor_profile_handler).put(update_doctor_profile_handler))
         .route("/api/doctors/impersonate/:target_id", post(doctor_impersonate_handler))
         .route("/api/records/:session_id", get(get_record_handler))
+        .route("/api/sessions/:session_id/ecg_paper", post(upload_ecg_paper_handler).delete(delete_ecg_paper_handler))
         .route("/api/devices/:device_id/command", post(device_command_handler))
         .route("/api/devices/:device_id/assign", post(assign_device_handler))
         .route("/api/frames", post(frame_preregister_handler))
