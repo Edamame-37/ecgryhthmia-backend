@@ -27,7 +27,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
         
         "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE, started_at TIMESTAMP WITH TIME ZONE NOT NULL, ended_at TIMESTAMP WITH TIME ZONE, file_path TEXT, ecg_paper TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)",
         
-        "CREATE TABLE IF NOT EXISTS frame_records (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, start_time DOUBLE PRECISION NOT NULL, end_time DOUBLE PRECISION NOT NULL, time_interval TEXT NOT NULL, label TEXT NOT NULL, dev_note TEXT, doc_note TEXT, confirmation BOOLEAN DEFAULT FALSE, doc_classification TEXT, hidden BOOLEAN DEFAULT FALSE, created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)"
+        "CREATE TABLE IF NOT EXISTS frame_records (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, start_time DOUBLE PRECISION NOT NULL, end_time DOUBLE PRECISION NOT NULL, time_interval TEXT NOT NULL, label TEXT NOT NULL, dev_note TEXT, doc_note TEXT, confirmation BOOLEAN DEFAULT NULL, doc_classification TEXT, hidden BOOLEAN DEFAULT FALSE, created_by TEXT REFERENCES accounts(id) ON DELETE SET NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)"
     ];
 
     for q in queries.iter() {
@@ -68,8 +68,14 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
         info!("[Database] Background writer task berjalan...");
         let mut device_map: HashMap<String, String> = HashMap::new();
         let mut session_map: HashMap<String, String> = HashMap::new();
+        let mut ended_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         while let Some(mut payload) = rx.recv().await {
+            // 0. Abaikan payload dari sesi yang sudah di-stop
+            if ended_sessions.contains(&payload.session_id) {
+                continue;
+            }
+
             // 1. Dapatkan atau buat device ID internal
             let dev_id = if let Some(id) = device_map.get(&payload.device_id) {
                 id.clone()
@@ -103,7 +109,7 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
             let ses_id = if let Some(id) = session_map.get(&payload.session_id) {
                 id.clone()
             } else {
-                let new_id = uuid::Uuid::new_v4().to_string();
+                let new_id = generate_custom_id(&pool, "sessions", "ses").await;
                 session_map.insert(payload.session_id.clone(), new_id.clone());
                 
                 let initial_file_path = format!("records_local/{}.jsonl", new_id);
@@ -122,6 +128,17 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
                 }
                 new_id
             };
+
+            // 2.5 Periksa status 'ended_at' secara berkala
+            let frame_num = payload.frame_id.parse::<i64>().unwrap_or(1);
+            if frame_num % 10 == 0 {
+                if let Ok(Some(record)) = sqlx::query!("SELECT ended_at FROM sessions WHERE id = $1", ses_id).fetch_optional(&pool).await {
+                    if record.ended_at.is_some() {
+                        ended_sessions.insert(payload.session_id.clone()); // add original session ID to block list
+                        continue;
+                    }
+                }
+            }
 
             payload.session_id = ses_id.clone();
             let file_path = format!("records_local/{}.jsonl", ses_id);

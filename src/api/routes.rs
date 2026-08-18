@@ -681,7 +681,7 @@ async fn frame_preregister_handler(
     }
 
     match sqlx::query!(
-        "INSERT INTO frame_records (id, session_id, time_interval, start_time, end_time, label, hidden) VALUES ($1, $2, $3, $4, $5, 'Processing', FALSE)", 
+        "INSERT INTO frame_records (id, session_id, time_interval, start_time, end_time, label, hidden, confirmation) VALUES ($1, $2, $3, $4, $5, 'Processing', FALSE, NULL)", 
         req.id, req.session_id, req.time_interval, start_time, end_time
     )
         .execute(&state.pool).await 
