@@ -67,16 +67,10 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
     tokio::spawn(async move {
         info!("[Database] Background writer task berjalan...");
         let mut device_map: HashMap<String, String> = HashMap::new();
-        let mut session_map: HashMap<String, String> = HashMap::new();
-        let mut ended_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // session_map dan ended_sessions DIHAPUS. Kita gunakan database sebagai single source of truth.
         let mut session_frame_counts: HashMap<String, i64> = HashMap::new();
 
         while let Some(mut payload) = rx.recv().await {
-            // 0. Abaikan payload dari sesi yang sudah di-stop
-            if ended_sessions.contains(&payload.session_id) {
-                continue;
-            }
-
             // 1. Dapatkan atau buat device ID internal
             let dev_id = if let Some(id) = device_map.get(&payload.device_id) {
                 id.clone()
@@ -106,38 +100,19 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
                 }
             };
 
-            // 2. Dapatkan atau buat session ID internal
-            let ses_id = if let Some(id) = session_map.get(&payload.session_id) {
-                id.clone()
-            } else {
-                let new_id = generate_custom_id(&pool, "sessions", "ses").await;
-                session_map.insert(payload.session_id.clone(), new_id.clone());
-                
-                let initial_file_path = format!("records/{}.jsonl", new_id);
-                
-                let patient_res = sqlx::query!("SELECT id FROM patients WHERE device_id = $1", dev_id)
-                    .fetch_one(&pool)
-                    .await;
-                let patient_id = patient_res.map(|r| r.id).ok();
-
-                if let Err(e) = sqlx::query!(
-                    "INSERT INTO sessions (id, device_id, patient_id, started_at, file_path) VALUES ($1, $2, $3, $4, $5)",
-                    new_id, dev_id, patient_id, chrono::DateTime::parse_from_rfc3339(&payload.created_at).unwrap_or_else(|_| chrono::Utc::now().into()).with_timezone(&chrono::Utc), initial_file_path
-                ).execute(&pool).await {
-                    error!("[Database] Gagal INSERT sesi: {}", e);
+            // 2. Dapatkan sesi AKTIF untuk perangkat ini dari pangkalan data
+            // Ini menjamin sinkronisasi dengan aksi UI (START / STOP) dan menuntaskan masalah Restart Bug.
+            let ses_res = sqlx::query!("SELECT id FROM sessions WHERE device_id = $1 AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1", dev_id)
+                .fetch_optional(&pool)
+                .await;
+            
+            let ses_id = match ses_res {
+                Ok(Some(record)) => record.id,
+                _ => {
+                    // Jika tidak ada sesi aktif, buang payload!
                     continue;
                 }
-                new_id
             };
-
-            // 2.5 Periksa status 'ended_at' secara berkala
-            // 2.5 Periksa status 'ended_at' di setiap frame (karena interval sangat aman: 1 frame/10 detik)
-            if let Ok(Some(record)) = sqlx::query!("SELECT ended_at FROM sessions WHERE id = $1", ses_id).fetch_optional(&pool).await {
-                if record.ended_at.is_some() {
-                    ended_sessions.insert(payload.session_id.clone()); // add original session ID to block list
-                    continue;
-                }
-            }
 
             // Hitung ulang frame_id mulai dari 1 untuk sesi ini
             let count = session_frame_counts.entry(ses_id.clone()).or_insert(1);
@@ -217,9 +192,10 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
                 best_label = payload.prediction.label.clone();
             }
 
+            let frame_db_id = format!("fra{}{:06}", ses_id.replace("ses", ""), frame_num);
             let _ = sqlx::query!(
-                "UPDATE frame_records SET label = $1 WHERE session_id = $2 AND time_interval = $3",
-                best_label, ses_id, time_interval
+                "INSERT INTO frame_records (id, session_id, time_interval, start_time, end_time, label, hidden, confirmation) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL) ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label",
+                frame_db_id, ses_id, time_interval, start_sec, end_sec, best_label
             ).execute(&pool).await;
 
             let _ = pacer_tx.send(payload);

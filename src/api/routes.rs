@@ -621,6 +621,18 @@ async fn device_command_handler(
 ) -> impl IntoResponse {
     if cmd.command.to_uppercase() == "START" {
         info!(device_id = %device_id, "Perekaman Dimulai");
+        
+        // Buat session baru secara proaktif di database saat START
+        if let Ok(record) = sqlx::query!("SELECT id FROM devices WHERE name = $1 OR id = $1 LIMIT 1", device_id).fetch_one(&state.pool).await {
+            let new_id = crate::db::postgres::generate_custom_id(&state.pool, "sessions", "ses").await;
+            let initial_file_path = format!("records/{}.jsonl", new_id);
+            let now = chrono::Utc::now();
+            
+            let _ = sqlx::query!(
+                "INSERT INTO sessions (id, device_id, patient_id, started_at, file_path) VALUES ($1, $2, $3, $4, $5)",
+                new_id, record.id, cmd.patient_id, now, initial_file_path
+            ).execute(&state.pool).await;
+        }
     } else if cmd.command.to_uppercase() == "STOP" {
         info!(device_id = %device_id, "Perekaman Selesai");
         let now = chrono::Utc::now();
@@ -672,23 +684,8 @@ async fn frame_preregister_handler(
     State(state): State<AppState>,
     Json(req): Json<FrameRequest>,
 ) -> impl IntoResponse {
-    let parts: Vec<&str> = req.time_interval.split(" - ").collect();
-    let mut start_time = 0.0;
-    let mut end_time = 10.0;
-    if parts.len() == 2 {
-        start_time = parse_time_seconds(parts[0]);
-        end_time = parse_time_seconds(parts[1]);
-    }
-
-    match sqlx::query!(
-        "INSERT INTO frame_records (id, session_id, time_interval, start_time, end_time, label, hidden, confirmation) VALUES ($1, $2, $3, $4, $5, 'Processing', FALSE, NULL)", 
-        req.id, req.session_id, req.time_interval, start_time, end_time
-    )
-        .execute(&state.pool).await 
-    {
-        Ok(_) => (StatusCode::OK, Json(ConfirmationResponse { success: true, message: "Frame pre-registered".to_string() })),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ConfirmationResponse { success: false, message: e.to_string() }))
-    }
+    // BYPASS: Database dikendalikan mutlak oleh backend (db_worker) agar sinkron 1:1 dengan .jsonl
+    (StatusCode::OK, Json(ConfirmationResponse { success: true, message: "Frame di-bypass, ditangani oleh db_worker".to_string() }))
 }
 
 async fn frame_session_update_handler(
