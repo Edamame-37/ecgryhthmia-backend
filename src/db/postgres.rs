@@ -131,20 +131,19 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
             };
 
             // 2.5 Periksa status 'ended_at' secara berkala
-            // 2.5 Periksa status 'ended_at' secara berkala
-            let raw_frame_num = payload.frame_id.parse::<i64>().unwrap_or(1);
-            if raw_frame_num % 10 == 0 {
-                if let Ok(Some(record)) = sqlx::query!("SELECT ended_at FROM sessions WHERE id = $1", ses_id).fetch_optional(&pool).await {
-                    if record.ended_at.is_some() {
-                        ended_sessions.insert(payload.session_id.clone()); // add original session ID to block list
-                        continue;
-                    }
+            // 2.5 Periksa status 'ended_at' di setiap frame (karena interval sangat aman: 1 frame/10 detik)
+            if let Ok(Some(record)) = sqlx::query!("SELECT ended_at FROM sessions WHERE id = $1", ses_id).fetch_optional(&pool).await {
+                if record.ended_at.is_some() {
+                    ended_sessions.insert(payload.session_id.clone()); // add original session ID to block list
+                    continue;
                 }
             }
 
             // Hitung ulang frame_id mulai dari 1 untuk sesi ini
             let count = session_frame_counts.entry(ses_id.clone()).or_insert(1);
             payload.frame_id = format!("{:06}", count);
+            // Timpa juga message_id agar sinkron dengan yang dialirkan WebSocket (Pacer)
+            payload.message_id = format!("{}-{}-frame_{:06}", payload.device_id, ses_id, count);
             *count += 1;
 
             let label = &payload.prediction.label;
