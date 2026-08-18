@@ -670,20 +670,7 @@ async fn device_command_handler(
     }
 }
 
-fn parse_time_seconds(time_str: &str) -> f64 {
-    let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() == 2 {
-        let m: f64 = parts[0].parse().unwrap_or(0.0);
-        let s: f64 = parts[1].parse().unwrap_or(0.0);
-        return m * 60.0 + s;
-    }
-    0.0
-}
-
-async fn frame_preregister_handler(
-    State(state): State<AppState>,
-    Json(req): Json<FrameRequest>,
-) -> impl IntoResponse {
+async fn frame_preregister_handler() -> impl IntoResponse {
     // BYPASS: Database dikendalikan mutlak oleh backend (db_worker) agar sinkron 1:1 dengan .jsonl
     (StatusCode::OK, Json(ConfirmationResponse { success: true, message: "Frame di-bypass, ditangani oleh db_worker".to_string() }))
 }
