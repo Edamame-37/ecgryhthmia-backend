@@ -138,6 +138,7 @@ pub struct DeviceRecord {
     pub mqtt_port: Option<i32>,
     pub mqtt_topic: Option<String>,
     pub mqtt_username: Option<String>,
+    pub assigned_to: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -774,11 +775,12 @@ async fn get_sessions_from_db(
 
 async fn get_devices_from_db(pool: &PgPool) -> Vec<DeviceRecord> {
     sqlx::query!(
-        "SELECT id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username FROM devices"
+        "SELECT d.id as \"id!\", d.name as \"name!\", d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, p.id as \"assigned_to?\"
+         FROM devices d LEFT JOIN patients p ON d.id = p.device_id"
     ).fetch_all(pool).await.unwrap_or_default()
     .into_iter().map(|row| DeviceRecord {
         id: row.id, name: row.name, mqtt_broker: row.mqtt_broker, mqtt_port: row.mqtt_port,
-        mqtt_topic: row.mqtt_topic, mqtt_username: row.mqtt_username,
+        mqtt_topic: row.mqtt_topic, mqtt_username: row.mqtt_username, assigned_to: row.assigned_to
     }).collect()
 }
 
