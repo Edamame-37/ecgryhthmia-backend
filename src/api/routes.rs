@@ -646,7 +646,7 @@ async fn device_command_handler(
     let clients = state.mqtt_clients.read().await;
     
     if let Some(client) = clients.get(&device_id) {
-        let payload = serde_json::to_string(&cmd).unwrap_or_else(|_| cmd.command.clone());
+        let payload = cmd.command.clone();
         if let Err(e) = client.clone().publish(&topic, rumqttc::QoS::AtLeastOnce, false, payload) {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "message": format!("Gagal mengirim perintah: {}", e)})))
         } else {
