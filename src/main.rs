@@ -59,7 +59,7 @@ async fn main() {
     let mqtt_clients = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     
     {
-        if let Ok(devices) = sqlx::query!("SELECT name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices WHERE mqtt_broker IS NOT NULL AND mqtt_port IS NOT NULL")
+        if let Ok(devices) = sqlx::query!("SELECT id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices WHERE mqtt_broker IS NOT NULL AND mqtt_port IS NOT NULL")
             .fetch_all(&pool).await 
         {
             for device in devices {
@@ -92,7 +92,7 @@ async fn main() {
                     );
                     
                     let mut clients_map = mqtt_clients.write().await;
-                    clients_map.insert(device.name, client);
+                    clients_map.insert(device.id, client);
                 }
             }
         }
