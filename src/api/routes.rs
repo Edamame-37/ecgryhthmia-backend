@@ -364,6 +364,20 @@ async fn admin_register_handler(
     })))
 }
 
+#[derive(Serialize)]
+pub struct PaginationInfo {
+    pub total: i64,
+    pub page: i64,
+    pub limit: i64,
+    pub total_pages: i64,
+}
+
+#[derive(Serialize)]
+pub struct PaginatedResponse<T> {
+    pub data: Vec<T>,
+    pub pagination: PaginationInfo,
+}
+
 async fn get_sessions_handler(
     claims: UserClaims,
     State(state): State<AppState>,
@@ -371,6 +385,8 @@ async fn get_sessions_handler(
 ) -> impl IntoResponse {
     let mut filter_patient_id = params.get("patient_id").cloned();
     let mut filter_doctor_id = params.get("doctor_id").cloned();
+    let page: i64 = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10);
 
     if claims.0.role == "dokter" {
         filter_doctor_id = Some(claims.0.sub.clone());
@@ -378,16 +394,41 @@ async fn get_sessions_handler(
         filter_patient_id = Some(claims.0.sub.clone());
     }
 
-    let sessions = get_sessions_from_db(filter_patient_id, filter_doctor_id, &state.pool).await;
-    Json(serde_json::json!({ "sessions": sessions }))
+    let (sessions, total) = get_sessions_from_db(filter_patient_id, filter_doctor_id, page, limit, &state.pool).await;
+    
+    let total_pages = (total as f64 / limit as f64).ceil() as i64;
+    
+    Json(PaginatedResponse {
+        data: sessions,
+        pagination: PaginationInfo {
+            total,
+            page,
+            limit,
+            total_pages,
+        }
+    })
 }
 
 async fn get_patient_sessions_handler(
     State(state): State<AppState>,
     AxumPath(patient_id): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let sessions = get_sessions_from_db(Some(patient_id), None, &state.pool).await;
-    Json(sessions)
+    let page: i64 = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10);
+    
+    let (sessions, total) = get_sessions_from_db(Some(patient_id), None, page, limit, &state.pool).await;
+    let total_pages = (total as f64 / limit as f64).ceil() as i64;
+    
+    Json(PaginatedResponse {
+        data: sessions,
+        pagination: PaginationInfo {
+            total,
+            page,
+            limit,
+            total_pages,
+        }
+    })
 }
 
 async fn get_devices_handler(
@@ -408,9 +449,24 @@ async fn get_admin_stats_handler(
 async fn get_admin_users_handler(
     _claims: AdminClaims,
     State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let users = get_admin_users(&state.pool).await;
-    Json(users)
+    let page: i64 = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10);
+    let role_filter = params.get("role").cloned();
+    
+    let (users, total) = get_admin_users(page, limit, role_filter, &state.pool).await;
+    let total_pages = (total as f64 / limit as f64).ceil() as i64;
+    
+    Json(PaginatedResponse {
+        data: users,
+        pagination: PaginationInfo {
+            total,
+            page,
+            limit,
+            total_pages,
+        }
+    })
 }
 
 async fn impersonate_handler(
@@ -463,8 +519,16 @@ async fn doctor_impersonate_handler(
 
 async fn get_patients_handler(
     State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let patients = sqlx::query!("SELECT id, first_name, last_name, age, gender FROM patients")
+    let page: i64 = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10);
+    let offset = (page - 1) * limit;
+
+    let total = sqlx::query!("SELECT COUNT(*) FROM patients").fetch_one(&state.pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+    let total_pages = (total as f64 / limit as f64).ceil() as i64;
+
+    let patients = sqlx::query!("SELECT id, first_name, last_name, age, gender FROM patients ORDER BY id LIMIT $1 OFFSET $2", limit, offset)
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default()
@@ -479,7 +543,15 @@ async fn get_patients_handler(
         })
         .collect::<Vec<_>>();
         
-    (StatusCode::OK, Json(serde_json::json!(patients)))
+    Json(PaginatedResponse {
+        data: patients,
+        pagination: PaginationInfo {
+            total,
+            page,
+            limit,
+            total_pages,
+        }
+    })
 }
 
 async fn get_patient_profile_handler(
@@ -558,14 +630,24 @@ async fn disconnect_patient_handler(
 async fn get_doctor_patients_handler(
     State(state): State<AppState>,
     AxumPath(doctor_id): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let page: i64 = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10);
+    let offset = (page - 1) * limit;
+
     let actual_doctor_id = sqlx::query!("SELECT id FROM doctors WHERE id = $1 OR account_id = $1", doctor_id)
         .fetch_one(&state.pool).await.map(|r| r.id).unwrap_or(doctor_id.to_string());
+        
+    let total = sqlx::query!("SELECT COUNT(*) FROM patients WHERE primary_doctor_id = $1", actual_doctor_id)
+        .fetch_one(&state.pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+    let total_pages = (total as f64 / limit as f64).ceil() as i64;
+
     let patients = sqlx::query!(
         "SELECT p.id, p.first_name, p.last_name, a.profile_photo 
          FROM patients p 
          LEFT JOIN accounts a ON p.account_id = a.id 
-         WHERE p.primary_doctor_id = $1", actual_doctor_id
+         WHERE p.primary_doctor_id = $1 ORDER BY p.id LIMIT $2 OFFSET $3", actual_doctor_id, limit, offset
     ).fetch_all(&state.pool).await.unwrap_or_default()
     .into_iter()
     .map(|row| {
@@ -576,7 +658,15 @@ async fn get_doctor_patients_handler(
         })
     }).collect::<Vec<_>>();
 
-    (StatusCode::OK, Json(serde_json::json!(patients)))
+    Json(PaginatedResponse {
+        data: patients,
+        pagination: PaginationInfo {
+            total,
+            page,
+            limit,
+            total_pages,
+        }
+    })
 }
 
 async fn get_record_handler(
@@ -692,8 +782,10 @@ async fn frame_session_update_handler(
 async fn get_sessions_from_db(
     filter_patient_id: Option<String>,
     filter_doctor_id: Option<String>,
+    page: i64,
+    limit: i64,
     pool: &PgPool
-) -> Vec<SessionRecord> {
+) -> (Vec<SessionRecord>, i64) {
     let mut actual_doc_id = None;
     let mut is_doctor_filtered = false;
     
@@ -723,51 +815,60 @@ async fn get_sessions_from_db(
     // SECURITY FAILSAFE: If a doctor or patient filter was requested but NOT found in DB, return empty immediately!
     if (is_doctor_filtered && actual_doc_id.is_none()) || (is_patient_filtered && actual_pat_id.is_none()) {
         tracing::warn!("Security failsafe triggered: requested filter not found in database. Returning empty sessions array.");
-        return vec![];
+        return (vec![], 0);
     }
 
     if let (Some(pid), Some(did)) = (&actual_pat_id, &actual_doc_id) {
         let belongs = sqlx::query!("SELECT 1 as x FROM patients WHERE id = $1 AND primary_doctor_id = $2", pid, did)
             .fetch_optional(pool).await.unwrap_or_default().is_some();
         if !belongs {
-            return vec![];
+            return (vec![], 0);
         }
     }
 
-    if let Some(pid) = actual_pat_id {
-        sqlx::query!(
+    let offset = (page - 1) * limit;
+
+    let (records, total): (Vec<SessionRecord>, i64) = if let Some(pid) = actual_pat_id {
+        let total = sqlx::query!("SELECT COUNT(*) FROM sessions WHERE patient_id = $1", pid).fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+        let records = sqlx::query!(
             "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
-             WHERE s.patient_id = $1 ORDER BY s.started_at DESC", pid
+             WHERE s.patient_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", pid, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
             ecg_paper: row.ecg_paper
-        }).collect()
+        }).collect();
+        (records, total)
     } else if let Some(did) = actual_doc_id {
-        sqlx::query!(
+        let total = sqlx::query!("SELECT COUNT(*) FROM sessions s JOIN patients p ON s.patient_id = p.id WHERE p.primary_doctor_id = $1", did).fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+        let records = sqlx::query!(
             "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
              FROM sessions s JOIN patients p ON s.patient_id = p.id 
-             WHERE p.primary_doctor_id = $1 ORDER BY s.started_at DESC", did
+             WHERE p.primary_doctor_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", did, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
             ecg_paper: row.ecg_paper
-        }).collect()
+        }).collect();
+        (records, total)
     } else {
-        sqlx::query!(
+        let total = sqlx::query!("SELECT COUNT(*) FROM sessions").fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+        let records = sqlx::query!(
             "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
-             ORDER BY s.started_at DESC"
+             ORDER BY s.started_at DESC LIMIT $1 OFFSET $2", limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
             ecg_paper: row.ecg_paper
-        }).collect()
-    }
+        }).collect();
+        (records, total)
+    };
+    (records, total)
 }
 
 async fn get_devices_from_db(pool: &PgPool) -> Vec<DeviceRecord> {
@@ -805,19 +906,55 @@ async fn get_admin_stats(pool: &PgPool) -> AdminStats {
     stats
 }
 
-async fn get_admin_users(pool: &PgPool) -> Vec<AdminUser> {
-    sqlx::query!(
+async fn get_admin_users(page: i64, limit: i64, role_filter: Option<String>, pool: &PgPool) -> (Vec<AdminUser>, i64) {
+    let offset = (page - 1) * limit;
+    let mut total = 0;
+    
+    if let Some(r) = role_filter {
+        total = sqlx::query!("SELECT COUNT(*) FROM accounts WHERE role = $1", r).fetch_one(pool).await.map(|row| row.count.unwrap_or(0)).unwrap_or(0);
+        if r == "pasien" {
+            let users = sqlx::query!(
+                "SELECT p.id, a.id as account_id, p.first_name || ' ' || p.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, p.primary_doctor_id as connected_doctor_id, p.device_id as connected_device_id, a.profile_photo
+                 FROM patients p JOIN accounts a ON p.account_id = a.id
+                 WHERE a.role = 'pasien'
+                 ORDER BY a.created_at DESC LIMIT $1 OFFSET $2", limit, offset
+            ).fetch_all(pool).await.unwrap_or_default()
+            .into_iter().map(|row| AdminUser {
+                id: row.id, account_id: row.account_id, name: row.name.unwrap_or_default(), role: row.role, status: row.status.unwrap_or_default(), 
+                registered_at: row.created_at.map(|t| t.to_string()), connected_doctor_id: row.connected_doctor_id, connected_device_id: row.connected_device_id, profile_photo: row.profile_photo
+            }).collect();
+            return (users, total);
+        } else if r == "dokter" {
+            let users = sqlx::query!(
+                "SELECT d.id, a.id as account_id, d.first_name || ' ' || d.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, NULL as connected_doctor_id, NULL as connected_device_id, a.profile_photo
+                 FROM doctors d JOIN accounts a ON d.account_id = a.id
+                 WHERE a.role = 'dokter'
+                 ORDER BY a.created_at DESC LIMIT $1 OFFSET $2", limit, offset
+            ).fetch_all(pool).await.unwrap_or_default()
+            .into_iter().map(|row| AdminUser {
+                id: row.id, account_id: row.account_id, name: row.name.unwrap_or_default(), role: row.role, status: row.status.unwrap_or_default(), 
+                registered_at: row.created_at.map(|t| t.to_string()), connected_doctor_id: row.connected_doctor_id, connected_device_id: row.connected_device_id, profile_photo: row.profile_photo
+            }).collect();
+            return (users, total);
+        }
+    }
+    
+    total = sqlx::query!("SELECT COUNT(*) FROM accounts").fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+    
+    let users = sqlx::query!(
         "SELECT p.id, a.id as account_id, p.first_name || ' ' || p.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, p.primary_doctor_id as connected_doctor_id, p.device_id as connected_device_id, a.profile_photo
          FROM patients p JOIN accounts a ON p.account_id = a.id
          UNION ALL
          SELECT d.id, a.id as account_id, d.first_name || ' ' || d.last_name as name, a.role, COALESCE(a.status, 'Offline') as status, a.created_at, NULL as connected_doctor_id, NULL as connected_device_id, a.profile_photo
          FROM doctors d JOIN accounts a ON d.account_id = a.id
-         ORDER BY created_at DESC"
+         ORDER BY created_at DESC LIMIT $1 OFFSET $2", limit, offset
     ).fetch_all(pool).await.unwrap_or_default()
     .into_iter().map(|row| AdminUser {
         id: row.id.unwrap_or_default(), account_id: row.account_id.unwrap_or_default(), name: row.name.unwrap_or_default(), role: row.role.unwrap_or_default(), status: row.status.unwrap_or_default(), 
         registered_at: row.created_at.map(|t| t.to_string()), connected_doctor_id: row.connected_doctor_id, connected_device_id: row.connected_device_id, profile_photo: row.profile_photo
-    }).collect()
+    }).collect();
+    
+    (users, total)
 }
 
 async fn get_patient_profile(patient_id: String, pool: &PgPool) -> Option<PatientProfileResponse> {
