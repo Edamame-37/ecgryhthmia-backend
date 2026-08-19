@@ -908,7 +908,7 @@ async fn get_admin_stats(pool: &PgPool) -> AdminStats {
 
 async fn get_admin_users(page: i64, limit: i64, role_filter: Option<String>, pool: &PgPool) -> (Vec<AdminUser>, i64) {
     let offset = (page - 1) * limit;
-    let mut total = 0;
+    let mut total;
     
     if let Some(r) = role_filter {
         total = sqlx::query!("SELECT COUNT(*) FROM accounts WHERE role = $1", r).fetch_one(pool).await.map(|row| row.count.unwrap_or(0)).unwrap_or(0);
