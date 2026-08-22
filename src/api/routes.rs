@@ -1168,9 +1168,6 @@ pub fn create_router(state: AppState) -> Router {
         .allow_origin([
             "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
             "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
-            "http://localhost:5173".parse::<HeaderValue>().unwrap(),
-            "http://localhost:5174".parse::<HeaderValue>().unwrap(),
-            "http://localhost:5175".parse::<HeaderValue>().unwrap(),
         ])
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
