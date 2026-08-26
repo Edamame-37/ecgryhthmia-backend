@@ -873,8 +873,8 @@ async fn get_sessions_from_db(
 
 async fn get_devices_from_db(pool: &PgPool) -> Vec<DeviceRecord> {
     sqlx::query!(
-        "SELECT d.id as \"id!\", d.name as \"name!\", d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, (SELECT p.id FROM patients p WHERE p.device_id = d.id LIMIT 1) as \"assigned_to?\"
-         FROM devices d"
+        "SELECT d.id as \"id!\", d.name as \"name!\", d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, p.id as \"assigned_to?\"
+         FROM devices d LEFT JOIN patients p ON d.id = p.device_id"
     ).fetch_all(pool).await.unwrap_or_default()
     .into_iter().map(|row| DeviceRecord {
         id: row.id, name: row.name, mqtt_broker: row.mqtt_broker, mqtt_port: row.mqtt_port,
@@ -1168,6 +1168,9 @@ pub fn create_router(state: AppState) -> Router {
         .allow_origin([
             "https://ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
             "https://www.ecgrhythmia.cloud".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5173".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5174".parse::<HeaderValue>().unwrap(),
+            "http://localhost:5175".parse::<HeaderValue>().unwrap(),
         ])
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
