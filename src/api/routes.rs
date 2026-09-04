@@ -128,6 +128,7 @@ pub struct SessionRecord {
     pub ended_at: Option<String>,
     pub file_path: String,
     pub ecg_paper: Option<String>,
+    pub dev_note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -528,7 +529,7 @@ async fn get_patients_handler(
     let total = sqlx::query!("SELECT COUNT(*) FROM patients").fetch_one(&state.pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
     let total_pages = (total as f64 / limit as f64).ceil() as i64;
 
-    let patients = sqlx::query!("SELECT id, first_name, last_name, age, gender FROM patients ORDER BY id LIMIT $1 OFFSET $2", limit, offset)
+    let patients = sqlx::query!("SELECT p.id, p.first_name, p.last_name, p.age, p.gender, p.device_id, p.primary_doctor_id, a.profile_photo FROM patients p LEFT JOIN accounts a ON p.account_id = a.id ORDER BY p.id LIMIT $1 OFFSET $2", limit, offset)
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default()
@@ -538,7 +539,10 @@ async fn get_patients_handler(
                 "id": row.id,
                 "name": format!("{} {}", row.first_name, row.last_name).trim().to_string(),
                 "age": row.age,
-                "gender": row.gender
+                "gender": row.gender,
+                "profile_photo": row.profile_photo,
+                "connected_device_id": row.device_id,
+                "primary_doctor_id": row.primary_doctor_id
             })
         })
         .collect::<Vec<_>>();
@@ -831,40 +835,40 @@ async fn get_sessions_from_db(
     let (records, total): (Vec<SessionRecord>, i64) = if let Some(pid) = actual_pat_id {
         let total = sqlx::query!("SELECT COUNT(*) FROM sessions WHERE patient_id = $1", pid).fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
         let records = sqlx::query!(
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper, s.dev_note 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
              WHERE s.patient_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", pid, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
-            ecg_paper: row.ecg_paper
+            ecg_paper: row.ecg_paper, dev_note: row.dev_note
         }).collect();
         (records, total)
     } else if let Some(did) = actual_doc_id {
         let total = sqlx::query!("SELECT COUNT(*) FROM sessions s JOIN patients p ON s.patient_id = p.id WHERE p.primary_doctor_id = $1", did).fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
         let records = sqlx::query!(
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper, s.dev_note 
              FROM sessions s JOIN patients p ON s.patient_id = p.id 
              WHERE p.primary_doctor_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", did, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
-            ecg_paper: row.ecg_paper
+            ecg_paper: row.ecg_paper, dev_note: row.dev_note
         }).collect();
         (records, total)
     } else {
         let total = sqlx::query!("SELECT COUNT(*) FROM sessions").fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
         let records = sqlx::query!(
-            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper 
+            "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper, s.dev_note 
              FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
              ORDER BY s.started_at DESC LIMIT $1 OFFSET $2", limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
-            ecg_paper: row.ecg_paper
+            ecg_paper: row.ecg_paper, dev_note: row.dev_note
         }).collect();
         (records, total)
     };
@@ -873,8 +877,8 @@ async fn get_sessions_from_db(
 
 async fn get_devices_from_db(pool: &PgPool) -> Vec<DeviceRecord> {
     sqlx::query!(
-        "SELECT d.id as \"id!\", d.name as \"name!\", d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, p.id as \"assigned_to?\"
-         FROM devices d LEFT JOIN patients p ON d.id = p.device_id"
+        "SELECT d.id as \"id!\", d.name as \"name!\", d.mqtt_broker, d.mqtt_port, d.mqtt_topic, d.mqtt_username, (SELECT p.id FROM patients p WHERE p.device_id = d.id LIMIT 1) as \"assigned_to?\"
+         FROM devices d"
     ).fetch_all(pool).await.unwrap_or_default()
     .into_iter().map(|row| DeviceRecord {
         id: row.id, name: row.name, mqtt_broker: row.mqtt_broker, mqtt_port: row.mqtt_port,
@@ -994,7 +998,7 @@ async fn get_doctor_profile(doctor_id: String, pool: &PgPool) -> Option<DoctorPr
     })
 }
 
-async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool: &PgPool, api_url: &str) -> Result<(), String> {
+async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest, pool: &PgPool, _api_url: &str) -> Result<(), String> {
     let doctor_record = sqlx::query!("SELECT id, account_id FROM doctors WHERE id = $1 OR account_id = $1", doctor_id)
         .fetch_one(pool).await.map_err(|_| "Dokter tidak ditemukan".to_string())?;
     let actual_doctor_id = doctor_record.id;
@@ -1012,7 +1016,7 @@ async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest,
                     let filename = format!("{}_{}.jpg", doctor_id, Utc::now().timestamp());
                     let filepath = uploads_dir.join(&filename);
                     if fs::write(&filepath, image_bytes).is_ok() {
-                        final_photo_url = Some(format!("{}/uploads/profiles/{}", api_url.trim_end_matches('/'), filename));
+                        final_photo_url = Some(format!("/uploads/profiles/{}", filename));
                     }
                 }
             }
@@ -1028,7 +1032,7 @@ async fn update_doctor_profile(doctor_id: &str, req: UpdateDoctorProfileRequest,
     Ok(())
 }
 
-async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, pool: &PgPool, api_url: &str) -> Result<(), String> {
+async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileRequest, pool: &PgPool, _api_url: &str) -> Result<(), String> {
     let patient_record = sqlx::query!("SELECT id, account_id FROM patients WHERE id = $1 OR account_id = $1", patient_id)
         .fetch_one(pool).await.map_err(|_| "Pasien tidak ditemukan".to_string())?;
     let actual_patient_id = patient_record.id;
@@ -1046,7 +1050,7 @@ async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileReque
                     let filename = format!("{}_{}.jpg", patient_id, Utc::now().timestamp());
                     let filepath = uploads_dir.join(&filename);
                     if fs::write(&filepath, image_bytes).is_ok() {
-                        final_photo_url = Some(format!("{}/uploads/profiles/{}", api_url.trim_end_matches('/'), filename));
+                        final_photo_url = Some(format!("/uploads/profiles/{}", filename));
                     }
                 }
             }
