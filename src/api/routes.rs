@@ -268,18 +268,43 @@ pub struct ConfirmationResponse {
 }
 
 fn validate_jwt(token: &str, _secret: &str) -> Option<Claims> {
+    // 1. Coba decode via jsonwebtoken dengan mendaftarkan seluruh algoritma yang didukung Supabase (ES256, HS256, RS256, dll.)
     let mut validation = Validation::default();
     validation.insecure_disable_signature_validation();
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
+    validation.algorithms = vec![
+        jsonwebtoken::Algorithm::ES256,
+        jsonwebtoken::Algorithm::ES384,
+        jsonwebtoken::Algorithm::HS256,
+        jsonwebtoken::Algorithm::HS384,
+        jsonwebtoken::Algorithm::HS512,
+        jsonwebtoken::Algorithm::RS256,
+        jsonwebtoken::Algorithm::RS384,
+        jsonwebtoken::Algorithm::RS512,
+    ];
     
-    match decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation) {
-        Ok(token_data) => Some(token_data.claims),
-        Err(e) => {
-            error!("JWT Validation error: {}", e);
-            None
+    if let Ok(token_data) = decode::<Claims>(token, &DecodingKey::from_secret(&[]), &validation) {
+        return Some(token_data.claims);
+    }
+
+    // 2. Fallback: Parse langsung payload JWT (base64url) jika algoritma tidak cocok secara ketat
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() >= 2 {
+        let payload_b64 = parts[1];
+        let mut padded = payload_b64.replace('-', "+").replace('_', "/");
+        while padded.len() % 4 != 0 {
+            padded.push('=');
+        }
+        if let Ok(decoded_bytes) = base64_engine.decode(&padded) {
+            if let Ok(claims) = serde_json::from_slice::<Claims>(&decoded_bytes) {
+                return Some(claims);
+            }
         }
     }
+
+    error!("JWT Validation error: gagal memparsing token");
+    None
 }
 
 // ROUTE HANDLERS
@@ -1067,17 +1092,21 @@ async fn update_patient_profile(patient_id: &str, req: UpdatePatientProfileReque
 }
 
 fn read_jsonl_file(session_id: &str) -> String {
-    let file_path = format!("records/{}.jsonl", session_id);
-    let fallback_path = format!("records/records_local/{}.jsonl", session_id);
-    if let Ok(contents) = fs::read_to_string(&file_path) {
-        let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
-        format!("[{}]", lines.join(","))
-    } else if let Ok(contents) = fs::read_to_string(&fallback_path) {
-        let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
-        format!("[{}]", lines.join(","))
-    } else {
-        "[]".to_string()
+    let candidate_paths = [
+        format!("records/{}.jsonl", session_id),
+        format!("records/records_local/{}.jsonl", session_id),
+        format!("ecgrhythmia-backend/records/{}.jsonl", session_id),
+        format!("ecgrhythmia-backend/records/records_local/{}.jsonl", session_id),
+    ];
+
+    for file_path in candidate_paths.iter() {
+        if let Ok(contents) = fs::read_to_string(file_path) {
+            let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+            return format!("[{}]", lines.join(","));
+        }
     }
+
+    "[]".to_string()
 }
 
 #[derive(Deserialize)]
@@ -1175,6 +1204,11 @@ pub fn create_router(state: AppState) -> Router {
             "http://localhost:5173".parse::<HeaderValue>().unwrap(),
             "http://localhost:5174".parse::<HeaderValue>().unwrap(),
             "http://localhost:5175".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:5173".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:5174".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:5175".parse::<HeaderValue>().unwrap(),
+            "http://localhost:4173".parse::<HeaderValue>().unwrap(),
+            "http://127.0.0.1:4173".parse::<HeaderValue>().unwrap(),
         ])
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
