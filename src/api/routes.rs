@@ -829,21 +829,33 @@ async fn get_sessions_from_db(
     }
 
     let mut actual_pat_id = None;
+    let mut actual_pat_account_id: Option<String> = None;
     let mut is_patient_filtered = false;
     
     if let Some(pid) = filter_patient_id {
         is_patient_filtered = true;
-        match sqlx::query!("SELECT id FROM patients WHERE id = $1 OR account_id = $1", pid).fetch_one(pool).await {
-            Ok(r) => actual_pat_id = Some(r.id),
+        match sqlx::query!("SELECT id, account_id FROM patients WHERE id = $1 OR account_id = $1", pid).fetch_one(pool).await {
+            Ok(r) => {
+                actual_pat_id = Some(r.id);
+                actual_pat_account_id = r.account_id;
+            },
             Err(e) => {
-                tracing::error!("Failed to find patient for id {}: {}", pid, e);
+                // Periksa apakah ID tersebut merupakan akun admin yang sedang mengakses riwayat
+                let is_admin = sqlx::query!("SELECT role FROM accounts WHERE id = $1 AND role = 'admin'", pid)
+                    .fetch_optional(pool).await.unwrap_or_default().is_some();
+                if is_admin {
+                    tracing::info!("Akun admin {} mengakses riwayat pasien. Menampilkan seluruh sesi.", pid);
+                    is_patient_filtered = false;
+                } else {
+                    tracing::error!("Gagal menemukan pasien untuk id {}: {}", pid, e);
+                }
             }
         }
     }
 
-    // SECURITY FAILSAFE: If a doctor or patient filter was requested but NOT found in DB, return empty immediately!
+    // SECURITY FAILSAFE: Jika filter dokter/pasien diminta tetapi TIDAK ditemukan di DB, kembalikan array kosong
     if (is_doctor_filtered && actual_doc_id.is_none()) || (is_patient_filtered && actual_pat_id.is_none()) {
-        tracing::warn!("Security failsafe triggered: requested filter not found in database. Returning empty sessions array.");
+        tracing::warn!("Security failsafe triggered: filter yang diminta tidak ditemukan di database. Mengembalikan array kosong.");
         return (vec![], 0);
     }
 
@@ -858,11 +870,13 @@ async fn get_sessions_from_db(
     let offset = (page - 1) * limit;
 
     let (records, total): (Vec<SessionRecord>, i64) = if let Some(pid) = actual_pat_id {
-        let total = sqlx::query!("SELECT COUNT(*) FROM sessions WHERE patient_id = $1", pid).fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
+        let acc_id = actual_pat_account_id.clone().unwrap_or_else(|| pid.clone());
+        let total = sqlx::query!("SELECT COUNT(*) FROM sessions WHERE patient_id = $1 OR patient_id = $2", pid, acc_id)
+            .fetch_one(pool).await.map(|r| r.count.unwrap_or(0)).unwrap_or(0);
         let records = sqlx::query!(
             "SELECT s.id, s.device_id, s.patient_id, p.first_name || ' ' || p.last_name as patient_name, s.started_at, s.ended_at, s.file_path, s.ecg_paper, s.dev_note 
-             FROM sessions s LEFT JOIN patients p ON s.patient_id = p.id 
-             WHERE s.patient_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", pid, limit, offset
+             FROM sessions s LEFT JOIN patients p ON (s.patient_id = p.id OR s.patient_id = p.account_id) 
+             WHERE (s.patient_id = $1 OR s.patient_id = $2) ORDER BY s.started_at DESC LIMIT $3 OFFSET $4", pid, acc_id, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
             id: row.id, device_id: row.device_id, patient_id: row.patient_id, patient_name: row.patient_name,
