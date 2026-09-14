@@ -115,9 +115,10 @@ async fn main() {
         .route("/", axum::routing::get(network::websocket::ws_handler).with_state(clients.clone()))
         .route("/ws", axum::routing::get(network::websocket::ws_handler).with_state(clients.clone()));
 
-    // 9. Jalankan Server HTTP & WebSocket
-    let addr_ws = format!("{}:{}", config.host_ip, config.ws_port);
-    let addr_rest = format!("{}:{}", config.host_ip, config.rest_port);
+    // 9. Jalankan Server HTTP & WebSocket (gunakan 0.0.0.0 agar dapat diakses via 127.0.0.1 dan localhost)
+    let bind_ip = if config.host_ip == "127.0.0.1" { "0.0.0.0" } else { &config.host_ip };
+    let addr_ws = format!("{}:{}", bind_ip, config.ws_port);
+    let addr_rest = format!("{}:{}", bind_ip, config.rest_port);
 
     if config.ws_port == config.rest_port {
         info!("Menjalankan server terpadu Axum di http://{}", addr_ws);
