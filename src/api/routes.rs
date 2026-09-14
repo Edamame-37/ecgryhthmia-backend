@@ -865,7 +865,7 @@ async fn get_sessions_from_db(
              WHERE s.patient_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", pid, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
-            id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
+            id: row.id, device_id: row.device_id, patient_id: row.patient_id, patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
             ecg_paper: row.ecg_paper, dev_note: row.dev_note
         }).collect();
@@ -878,7 +878,7 @@ async fn get_sessions_from_db(
              WHERE p.primary_doctor_id = $1 ORDER BY s.started_at DESC LIMIT $2 OFFSET $3", did, limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
-            id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
+            id: row.id, device_id: row.device_id, patient_id: row.patient_id, patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
             ecg_paper: row.ecg_paper, dev_note: row.dev_note
         }).collect();
@@ -891,7 +891,7 @@ async fn get_sessions_from_db(
              ORDER BY s.started_at DESC LIMIT $1 OFFSET $2", limit, offset
         ).fetch_all(pool).await.unwrap_or_default()
         .into_iter().map(|row| SessionRecord {
-            id: row.id, device_id: row.device_id, patient_id: Some(row.patient_id), patient_name: row.patient_name,
+            id: row.id, device_id: row.device_id, patient_id: row.patient_id, patient_name: row.patient_name,
             started_at: row.started_at.to_rfc3339(), ended_at: row.ended_at.map(|d| d.to_rfc3339()), file_path: row.file_path.unwrap_or_default(),
             ecg_paper: row.ecg_paper, dev_note: row.dev_note
         }).collect();
@@ -1005,7 +1005,7 @@ async fn get_patient_profile(patient_id: String, pool: &PgPool) -> Option<Patien
 
     Some(PatientProfileResponse {
         patient: PatientRecord {
-            id: patient_res.id, first_name: patient_res.first_name, last_name: patient_res.last_name, age: patient_res.age.to_string(),
+            id: patient_res.id, first_name: patient_res.first_name, last_name: patient_res.last_name, age: patient_res.age.map(|a| a.to_string()).unwrap_or_else(|| "0".to_string()),
             gender: patient_res.gender.unwrap_or_default(), primary_doctor_id: patient_res.primary_doctor_id, profile_photo: patient_res.profile_photo, device_id: patient_res.device_id
         },
         doctor,
