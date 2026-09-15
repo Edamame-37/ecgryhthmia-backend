@@ -96,10 +96,10 @@ mod tests {
   },
   "prediction": {
     "status": "PASS",
-    "label": "Normal",
+    "label": "Non Arrhythmia",
     "confidence_percent": 98.75,
     "probabilities": {
-      "Normal": 98.75,
+      "Non Arrhythmia": 98.75,
       "AF": 0.2,
       "Takikardia": 0.1,
       "Bradikardia": 0.95

@@ -175,7 +175,7 @@ pub fn start_db_worker(pool: PgPool, pacer_tx: UnboundedSender<DevicePayload>) -
             
             let time_interval = format!("{} - {}", format_time(start_sec), format_time(end_sec));
             
-            let mut best_label = "Normal".to_string();
+            let mut best_label = "Non Arrhythmia".to_string();
             if let Some(probs) = &payload.prediction.probabilities {
                 if let Some(obj) = probs.as_object() {
                     let mut max_prob = -1.0;

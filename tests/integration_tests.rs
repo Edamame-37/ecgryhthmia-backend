@@ -136,7 +136,7 @@ async fn test_db_worker_session_writing() {
         },
         prediction: DevicePrediction {
             status: "PASS".to_string(),
-            label: "Normal".to_string(),
+            label: "Non Arrhythmia".to_string(),
             confidence_percent: 99.5,
             probabilities: None,
             threshold: None,
@@ -211,7 +211,7 @@ async fn test_pacer_streaming() {
         },
         prediction: DevicePrediction {
             status: "PASS".to_string(),
-            label: "Normal".to_string(),
+            label: "Non Arrhythmia".to_string(),
             confidence_percent: 99.5,
             probabilities: None,
             threshold: None,
