@@ -17,7 +17,11 @@ pub async fn connect_device(
     id: &str,
     sender: tokio::sync::mpsc::Sender<Inbound>,
 ) -> ApiResult<()> {
-    let row=sqlx::query("SELECT d.id,d.name,d.config_revision,c.mqtt_broker,c.mqtt_port,c.mqtt_topic,c.mqtt_username,c.mqtt_password FROM devices d JOIN device_credentials c ON c.device_id=d.id WHERE d.id=$1").bind(id).fetch_one(&state.pool).await?;
+    let row=sqlx::query("SELECT d.id,d.hardware_id,d.config_revision,c.mqtt_broker,c.mqtt_port,c.mqtt_topic,c.mqtt_username,c.mqtt_password FROM devices d JOIN device_credentials c ON c.device_id=d.id WHERE d.id=$1").bind(id).fetch_one(&state.pool).await?;
+    let hardware_id = row
+        .get::<Option<String>, _>("hardware_id")
+        .ok_or_else(|| ApiError::conflict("Device hardware identity requires review"))?;
+    crate::api::authorization::validate_id(&hardware_id)?;
     let host: String = row.get("mqtt_broker");
     let port: i32 = row.get("mqtt_port");
     let topic: String = row.get("mqtt_topic");
