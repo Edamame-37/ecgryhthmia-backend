@@ -1,0 +1,31 @@
+{
+  "verified_on": "2026-10-28",
+  "schema_version": 2026102708,
+  "legacy_entries_preserved": 3,
+  "appended_migrations": 8,
+  "original_business_columns_preserved": true,
+  "counts": {
+    "accounts": 164,
+    "patients": 165,
+    "doctors": 9,
+    "devices": 3,
+    "sessions": 204,
+    "frame_records": 2832,
+    "_sqlx_migrations": 3
+  },
+  "credential_configurations_preserved": 2,
+  "duplicate_profile_groups_preserved": 11,
+  "active_sessions_at_cutover": 0,
+  "startup": {
+    "host": "127.0.0.1",
+    "mqtt_network_disabled": true,
+    "migration_on_startup": false,
+    "endpoints": {
+      "/api/health": 200,
+      "/api/ready": 200,
+      "/api/auth/me": 401
+    }
+  },
+  "remote_app_deployed": false,
+  "auth_schema_changed": false
+}
