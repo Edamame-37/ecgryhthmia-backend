@@ -1,0 +1,80 @@
+name: Backend checks and release
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: ecg_test
+          POSTGRES_PASSWORD: ecg-test-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ecg_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:ecg-test-only@127.0.0.1:5432/ecg_test
+      BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN;'
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: python3 -m unittest discover -s tests -p '*_tests.py'
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --deny warnings
+      - run: cargo build --locked --release --bins
+      - name: Package tested commit
+        run: |
+          mkdir artifact
+          cp target/release/ecg-backend target/release/reconcile target/release/check_db target/release/check_sessions artifact/
+          printf '%s\n' "$BUILD_SHA" > artifact/RELEASE_SHA
+          (cd artifact; sha256sum ecg-backend reconcile check_db check_sessions RELEASE_SHA > SHA256SUMS)
+          tar -czf backend.tar.gz -C artifact .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ github.sha }}
+          path: backend.tar.gz
+          retention-days: 14
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-${{ github.sha }}
+      - name: Configure pinned SSH host key
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$PRIVATE_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Deploy immutable artifact
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          SHA: ${{ github.sha }}
+        run: |
+          [[ "$HOST" =~ ^[a-zA-Z0-9.-]+$ && "$USER" =~ ^[a-zA-Z0-9_-]+$ ]]
+          scp -o StrictHostKeyChecking=yes backend.tar.gz "$USER@$HOST:/opt/ecgrhythmia/incoming/$SHA.tar.gz"
+          ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "/opt/ecgrhythmia/release.sh /opt/ecgrhythmia/incoming/$SHA.tar.gz $SHA"
