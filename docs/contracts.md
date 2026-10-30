@@ -26,6 +26,10 @@ Supabase signup/email confirmation precedes POST /api/auth/register_profile. The
 
 POST /api/patients/:id/pairing-code creates a patient consent code. An administrator creates device codes at POST /api/devices/:id/pairing-code. Codes expire after 300 seconds, are stored as SHA256 digests, resource-bound and consumed transactionally once. Plain patient/device IDs are not consent.
 
+Device identity has three distinct fields: the immutable server-generated `devices.id`, the editable display `name`, and the reviewed firmware `hardware_id`. MQTT and imported payloads must match `hardware_id` exactly; display names never authorize or route data. Migration `2026102709` deliberately leaves historical hardware IDs null for operator review. Unmapped devices remain visible to the API with `mapping_status: "unmapped"`, but listeners and acquisition fail closed.
+
+Creating a device requires `hardware_id`; editing preserves the existing mapping when the field is omitted. A successful save returns `saved: true` and either `connection_status: "connecting"` or `"unavailable"`. Neither state claims the device is online; online status requires fresh telemetry. Internal IDs and hardware IDs share a collision-protected lookup namespace.
+
 ## Recording state machine
 
 ~~~mermaid
