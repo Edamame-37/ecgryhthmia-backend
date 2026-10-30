@@ -1,84 +1,109 @@
-/**
- * @fileoverview Modul Data: Ekstraksi CSV (Rust)
- * Bertugas membaca file dataset EKG statis (.csv) dan mengubahnya
- * menjadi struktur data RawECGData.
- * 
- * PENTING: File CSV yang dibaca diasumsikan sudah dikonversi secara offline 
- * dan memiliki minimal 4 kolom dengan urutan: Waktu, Ch1, Ch2, Ch3.
- * Data di dalam CSV diasumsikan SUDAH DALAM BENTUK MILIVOLT (mV).
- */
+use crate::api::error::{ApiError, ApiResult};
+use std::io::Read;
 
-use std::error::Error;
-use std::fs::File;
-use crate::models::payload::RawECGData;
-
-#[allow(dead_code)]
-pub fn read_ecg_data(file_path: &str) -> Result<RawECGData, Box<dyn Error>> {
-    let file = File::open(file_path)?;
-    
-    // Inisialisasi pembaca CSV. Asumsi file memiliki baris header (has_headers = true).
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(file);
-
-    // Siapkan vektor memori untuk menampung data
-    let mut time = Vec::new();
-    let mut ch1 = Vec::new();
-    let mut ch2 = Vec::new();
-    let mut ch3 = Vec::new();
-
-    // Iterasi baris demi baris secara efisien
-    
-    
-    for result in rdr.records() {
-        let record = result?;
-        
-        // Memastikan baris ini setidaknya memiliki 4 kolom data
-        if record.len() >= 4 {
-            // Parsing string menjadi float (f64). 
-            // Jika ada nilai kosong/NaN, default ke 0.0 agar sistem tidak crash.
-            time.push(record[0].parse::<f64>().unwrap_or(0.0));
-            ch1.push(record[1].parse::<f64>().unwrap_or(0.0));
-            ch2.push(record[2].parse::<f64>().unwrap_or(0.0));
-            ch3.push(record[3].parse::<f64>().unwrap_or(0.0));
+fn channel(header: &str) -> Option<usize> {
+    let normalized = header
+        .trim()
+        .to_ascii_lowercase()
+        .replace("(mV)", "")
+        .replace("(mv)", "")
+        .replace([' ', '_', '-'], "");
+    match normalized.as_str() {
+        "i" | "leadi" | "ch1" => Some(0),
+        "ii" | "leadii" | "ch2" => Some(1),
+        "iii" | "leadiii" | "ch3" => Some(2),
+        _ => None,
+    }
+}
+pub struct ParsedCsv {
+    pub samples: Vec<Vec<f64>>,
+    pub sampling_rate_hz: Option<f64>,
+}
+pub fn parse_csv_samples(reader: impl Read) -> ApiResult<Vec<Vec<f64>>> {
+    Ok(parse_csv_frame(reader)?.samples)
+}
+pub fn parse_csv_frame(reader: impl Read) -> ApiResult<ParsedCsv> {
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(reader);
+    let headers = reader
+        .headers()
+        .map_err(|_| ApiError::bad("CSV header missing"))?
+        .clone();
+    let mut columns = [None; 3];
+    let mut time_column = None;
+    for (index, header) in headers.iter().enumerate() {
+        if let Some(channel) = channel(header) {
+            if columns[channel].replace(index).is_some() {
+                return Err(ApiError::bad("Duplicate ECG channel"));
+            }
+        } else if !matches!(
+            header.trim().to_ascii_lowercase().as_str(),
+            "time" | "timestamp" | "t" | "time(s)" | "time (s)" | "timestamp (s)"
+        ) {
+            return Err(ApiError::bad(format!("Unknown CSV column: {header}")));
+        } else if time_column.replace(index).is_some() {
+            return Err(ApiError::bad("Duplicate CSV time column"));
         }
     }
-
-    Ok(RawECGData { time, ch1, ch2, ch3 })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn test_read_ecg_data_valid() {
-        let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join("test_ecg.csv");
-        let file_path_str = file_path.to_str().unwrap();
-
-        let mut file = File::create(file_path_str).unwrap();
-        writeln!(file, "time,ch1,ch2,ch3").unwrap();
-        writeln!(file, "0.0,1.2,2.3,3.4").unwrap();
-        writeln!(file, "0.04,1.5,,3.8").unwrap(); // missing value
-        writeln!(file, "0.08,invalid,2.1,3.9").unwrap(); // invalid value
-        drop(file);
-
-        let result = read_ecg_data(file_path_str);
-        assert!(result.is_ok());
-
-        let data = result.unwrap();
-        assert_eq!(data.time.len(), 3);
-        assert_eq!(data.time[0], 0.0);
-        assert_eq!(data.ch1[0], 1.2);
-        assert_eq!(data.ch2[0], 2.3);
-        assert_eq!(data.ch3[0], 3.4);
-
-        // check parsed fallbacks
-        assert_eq!(data.ch2[1], 0.0);
-        assert_eq!(data.ch1[2], 0.0);
-
-        let _ = std::fs::remove_file(file_path_str);
+    if columns.iter().any(Option::is_none) {
+        return Err(ApiError::bad("CSV requires Lead I, II and III"));
     }
+    let mut samples = Vec::new();
+    let mut previous_time: Option<f64> = None;
+    let mut sample_interval: Option<f64> = None;
+    for (index, row) in reader.records().enumerate() {
+        let row = row.map_err(|_| ApiError::bad(format!("Invalid CSV row {}", index + 2)))?;
+        if let Some(column) = time_column {
+            let time = row
+                .get(column)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| ApiError::bad(format!("Invalid CSV time at row {}", index + 2)))?;
+            if previous_time.is_some_and(|previous| time <= previous) {
+                return Err(ApiError::bad("CSV time must increase strictly"));
+            }
+            if let Some(previous) = previous_time {
+                let interval = time - previous;
+                if let Some(expected) = sample_interval {
+                    if (interval - expected).abs() > 1e-6f64.max(expected * 0.005) {
+                        return Err(ApiError::bad("CSV sample timing is not uniform"));
+                    }
+                } else {
+                    sample_interval = Some(interval);
+                }
+            }
+            previous_time = Some(time);
+        }
+        let mut sample = vec![0.0; 3];
+        for channel in 0..3 {
+            let value = row
+                .get(columns[channel].unwrap())
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && v.abs() <= 100.0)
+                .ok_or_else(|| {
+                    ApiError::bad(format!(
+                        "Invalid ECG value at row {}, channel {}",
+                        index + 2,
+                        channel + 1
+                    ))
+                })?;
+            sample[channel] = value;
+        }
+        samples.push(sample);
+        if samples.len() > 30000 {
+            return Err(ApiError::bad("CSV frame exceeds sample limit"));
+        }
+    }
+    if samples.is_empty() {
+        return Err(ApiError::bad("CSV contains no samples"));
+    }
+    let sampling_rate_hz = sample_interval.map(|interval| 1.0 / interval);
+    if sampling_rate_hz.is_some_and(|rate| !(99.99..=1000.01).contains(&rate)) {
+        return Err(ApiError::bad("Unsupported CSV sampling rate"));
+    }
+    Ok(ParsedCsv {
+        samples,
+        sampling_rate_hz,
+    })
 }
