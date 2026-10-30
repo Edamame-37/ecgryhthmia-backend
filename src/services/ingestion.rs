@@ -56,7 +56,7 @@ pub async fn persist(
     super::storage::reserve(state, "records", &path).await?;
     super::storage::reserve(state, "records", &temporary).await?;
     let mut transaction = state.pool.begin().await?;
-    let session=sqlx::query("SELECT s.id,s.patient_id,s.device_id,s.next_frame,s.next_time,s.state,d.name FROM sessions s JOIN devices d ON d.id=s.device_id WHERE s.id=$1 AND s.device_id=$2 AND s.deleted_at IS NULL FOR UPDATE OF s")
+    let session=sqlx::query("SELECT s.id,s.patient_id,s.device_id,s.next_frame,s.next_time,s.state,d.hardware_id FROM sessions s JOIN devices d ON d.id=s.device_id WHERE s.id=$1 AND s.device_id=$2 AND s.deleted_at IS NULL FOR UPDATE OF s")
   .bind(&payload.session_id).bind(device_id).fetch_optional(&mut *transaction).await?.ok_or_else(ApiError::missing)?;
     let state_name: String = session.get("state");
     if live && !matches!(state_name.as_str(), "recording" | "stopping") {
@@ -65,7 +65,10 @@ pub async fn persist(
     if !live && state_name != "importing" {
         return Err(ApiError::conflict("Session is not importing"));
     }
-    if payload.device_id != session.get::<String, _>("name") {
+    let hardware_id = session
+        .get::<Option<String>, _>("hardware_id")
+        .ok_or_else(|| ApiError::conflict("Device hardware identity requires review"))?;
+    if payload.device_id != hardware_id {
         return Err(ApiError::bad("Payload device does not match listener"));
     }
     if live {
