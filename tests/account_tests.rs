@@ -151,3 +151,44 @@ async fn account_token_cutoff_and_rate_limit_are_enforced() {
     );
     context.cleanup().await;
 }
+
+#[tokio::test]
+async fn stats_normalize_historical_normal_labels_without_rewriting_them() {
+    let context = TestContext::new().await;
+    for (index, label) in [
+        "Non Aritmia",
+        " non   aritmia ",
+        "Non Arrhythmia",
+        "NORMAL",
+        "NORM",
+        "NSR",
+        "UNKNOWN",
+        "AF",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query("INSERT INTO frame_records(id,session_id,start_time,end_time,time_interval,label,frame_number) VALUES($1,'ses_pat_A',$2,$3,$4,$5,$6)")
+            .bind(format!("fra_stats_{index}"))
+            .bind(index as f64)
+            .bind(index as f64 + 0.1)
+            .bind(format!("{index}"))
+            .bind(label)
+            .bind(index as i64 + 1)
+            .execute(&context.state.pool)
+            .await
+            .unwrap();
+    }
+    let response = context
+        .request("GET", "/api/admin/stats", Some("admin"), json!({}))
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(json_response(response).await["critical_alerts"], 1);
+    let stored: String =
+        sqlx::query_scalar("SELECT label FROM frame_records WHERE id='fra_stats_1'")
+            .fetch_one(&context.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, " non   aritmia ");
+    context.cleanup().await;
+}
