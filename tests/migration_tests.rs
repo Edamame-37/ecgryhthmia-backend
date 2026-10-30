@@ -50,6 +50,15 @@ async fn legacy_upgrade_preserves_data_and_moves_private_credentials() {
     .await
     .unwrap();
     assert_eq!(credential, "fixture-only");
+    let hardware_id: Option<String> =
+        sqlx::query_scalar("SELECT hardware_id FROM devices WHERE id='dev_old'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        hardware_id, None,
+        "Legacy hardware mappings must not be guessed"
+    );
     let private_columns:i64=sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema=$1 AND ((table_name='devices' AND column_name='mqtt_password') OR (table_name='accounts' AND column_name='password_hash'))").bind(&schema).fetch_one(&pool).await.unwrap();
     assert_eq!(private_columns, 0);
     let unchanged: f64 =
@@ -197,6 +206,62 @@ async fn unknown_or_modified_history_is_rejected_without_rewriting_it() {
             .1
             .contains("migration failed")
     );
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn readiness_checks_schema_metadata_and_separates_acquisition_mapping() {
+    let context = TestContext::new().await;
+    let report = ecg_backend::db::postgres::schema_report(&context.state.pool)
+        .await
+        .unwrap();
+    assert!(report.ready);
+    assert!(report.acquisition_ready);
+
+    sqlx::query("ALTER TABLE accounts ADD COLUMN password_hash TEXT")
+        .execute(&context.state.pool)
+        .await
+        .unwrap();
+    let report = ecg_backend::db::postgres::schema_report(&context.state.pool)
+        .await
+        .unwrap();
+    assert!(!report.ready);
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.contains("password_hash")));
+    sqlx::query("ALTER TABLE accounts DROP COLUMN password_hash")
+        .execute(&context.state.pool)
+        .await
+        .unwrap();
+
+    sqlx::query("ALTER TABLE sessions DISABLE ROW LEVEL SECURITY")
+        .execute(&context.state.pool)
+        .await
+        .unwrap();
+    let report = ecg_backend::db::postgres::schema_report(&context.state.pool)
+        .await
+        .unwrap();
+    assert!(!report.ready);
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue == "RLS disabled: sessions"));
+    sqlx::query("ALTER TABLE sessions ENABLE ROW LEVEL SECURITY")
+        .execute(&context.state.pool)
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE devices SET hardware_id=NULL WHERE id='dev_A'")
+        .execute(&context.state.pool)
+        .await
+        .unwrap();
+    let report = ecg_backend::db::postgres::schema_report(&context.state.pool)
+        .await
+        .unwrap();
+    assert!(report.ready);
+    assert!(!report.acquisition_ready);
+    assert_eq!(report.unmapped_device_count, Some(1));
     context.cleanup().await;
 }
 #[tokio::test]
