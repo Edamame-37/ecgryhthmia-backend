@@ -4,6 +4,7 @@ use ecg_backend::{
     services::recording::{self, Command, CommandInput, DeviceAck},
 };
 use serde_json::json;
+use std::process::Command as ProcessCommand;
 use support::*;
 #[tokio::test]
 async fn commands_are_idempotent_and_only_acknowledgments_change_recording_state() {
@@ -162,5 +163,62 @@ async fn orphan_cleanup_preserves_referenced_data_and_never_leaves_the_storage_r
         .await
         .unwrap();
     assert_eq!(retries, 1);
+    context.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inventory_reports_legacy_sources_without_changing_database_or_files() {
+    let context = TestContext::new().await;
+    let source = context.state.config.records_root.join("inventory.jsonl");
+    std::fs::write(&source, serde_json::to_vec(&payload(1)).unwrap()).unwrap();
+    sqlx::query(
+        "UPDATE sessions SET state='ended',ended_at=now(),file_path=$1 WHERE id='ses_pat_A'",
+    )
+    .bind(source.to_string_lossy().as_ref())
+    .execute(&context.state.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO frame_records(id,session_id,start_time,end_time,time_interval,label) VALUES('fra_inventory','ses_pat_A',0,0.2,'0 - 0.2','UNKNOWN')")
+        .execute(&context.state.pool)
+        .await
+        .unwrap();
+    let before: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('session',to_jsonb(s),'frames',(SELECT jsonb_agg(to_jsonb(f) ORDER BY f.id) FROM frame_records f WHERE f.session_id=s.id)) FROM sessions s WHERE s.id='ses_pat_A'",
+    )
+    .fetch_one(&context.state.pool)
+    .await
+    .unwrap();
+    let url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let output = tokio::task::block_in_place(|| {
+        ProcessCommand::new(env!("CARGO_BIN_EXE_reconcile"))
+            .env(
+                "DATABASE_URL",
+                format!("{url}{separator}options=-csearch_path%3D{}", context.schema),
+            )
+            .env("SUPABASE_URL", "https://auth.ecg.test")
+            .env("SUPABASE_ANON_KEY", "synthetic-public")
+            .env("RECORDS_ROOT", &context.state.config.records_root)
+            .env("UPLOADS_ROOT", &context.state.config.uploads_root)
+            .arg("--inventory")
+            .output()
+            .unwrap()
+    });
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["mode"], "read_only_inventory");
+    assert_eq!(report["readable_sources"], 1);
+    let after: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('session',to_jsonb(s),'frames',(SELECT jsonb_agg(to_jsonb(f) ORDER BY f.id) FROM frame_records f WHERE f.session_id=s.id)) FROM sessions s WHERE s.id='ses_pat_A'",
+    )
+    .fetch_one(&context.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(after, before);
+    assert!(source.exists());
     context.cleanup().await;
 }
