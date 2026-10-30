@@ -1,144 +1,81 @@
-use ecg_backend::{models, network, api, db, config};
-
-use tracing::{info, error, Level};
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::fmt::time::ChronoLocal;
-
+use ecg_backend::{
+    api::routes::{create_router, AppState},
+    config::AppConfig,
+    db::postgres,
+    network::mqtt_listener,
+    services::{ingestion, recording},
+};
+use std::error::Error;
 #[tokio::main]
-async fn main() {
-    // 1. Inisialisasi Tracing/Logging
-    let timer = ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string());
-    
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .with_timer(timer)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_span_events(FmtSpan::CLOSE)
-        .finish();
-        
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Gagal mengatur global default tracing subscriber");
-
-    // Cetak ASCII Banner
-    println!("\x1b[36m");
-    println!("   ____  ____  ____    ____             _                  _ ");
-    println!("  | ___|/ ___|/ ___|  | __ )  __ _  ___| | _____ _ __   __| |");
-    println!("  |  _|| |   | |  _   |  _ \\ / _` |/ __| |/ / _ \\ '_ \\ / _` |");
-    println!("  | |__| |___| |_| |  | |_) | (_| | (__|   <  __/ | | | (_| |");
-    println!("  |____|\\____|\\____|  |____/ \\__,_|\\___|_|\\_\\___|_| |_|\\__,_|");
-    println!("                                                             ");
-    println!("  [ MEDICAL BACKEND ENGINE - V1.0 ]\x1b[0m\n");
-
-    info!("Memulai inisialisasi sistem medis (Mode Asinkron Axum + PostgreSQL (Supabase))...");
-
-    // 2. Muat Konfigurasi dari berkas .env
-    let config = config::AppConfig::load();
-
-    // 3. Inisialisasi Database Pool PostgreSQL asinkron menggunakan sqlx
-    let pool = db::postgres::create_pool(&config.database_url).await;
-
-    // Lakukan auto-migration skema database pada saat startup
-    if let Err(e) = db::postgres::run_migrations(&pool).await {
-        error!("Gagal menjalankan auto-migrations database: {}", e);
-        panic!("Database migration failed: {}", e);
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    let config = AppConfig::load().map_err(|error| error.1)?;
+    let pool = postgres::create_pool(&config.database_url)
+        .await
+        .map_err(|error| error.1)?;
+    let migrate_only = std::env::args().any(|argument| argument == "--migrate-only");
+    if config.apply_migrations || migrate_only {
+        postgres::run_migrations(&pool)
+            .await
+            .map_err(|error| error.1)?;
     }
-    info!("Auto-migrations database PostgreSQL berhasil diselesaikan.");
-
-    // 4. Buat daftar klien WebSocket (ClientList) asinkron yang thread-safe
-    let clients = network::websocket::ClientList::default();
-
-    // 5. Jalankan Pacer asinkron (pemotongan data EKG & forward ke WebSocket)
-    let pacer_tx = network::pacer::start_pacer(clients.clone());
-
-    // 6. Jalankan Background Database Worker untuk menulis data asinkron
-    let db_tx = db::postgres::start_db_worker(pool.clone(), pacer_tx.clone());
-
-    // 7. Load Devices and start MQTT Listeners dynamically
-    let mqtt_clients = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-    
-    {
-        if let Ok(devices) = sqlx::query!("SELECT id, name, mqtt_broker, mqtt_port, mqtt_topic, mqtt_username, mqtt_password FROM devices WHERE mqtt_broker IS NOT NULL AND mqtt_port IS NOT NULL")
-            .fetch_all(&pool).await 
+    if migrate_only {
+        tracing::info!("Migrations completed");
+        return Ok(());
+    }
+    let current = postgres::schema_version(&pool)
+        .await
+        .map_err(|error| error.1)?;
+    if current != postgres::SCHEMA_VERSION {
+        return Err(format!("Database schema requires upgrade (current: {current}, required: {}). Review the backup/preflight in docs/rollout.md, then run: cargo run -- --migrate-only",postgres::SCHEMA_VERSION).into());
+    }
+    tokio::fs::create_dir_all(&config.records_root).await?;
+    tokio::fs::create_dir_all(&config.uploads_root).await?;
+    let rest_address = format!("{}:{}", config.host_ip, config.rest_port);
+    let ws_address = format!("{}:{}", config.host_ip, config.ws_port);
+    let state = AppState::new(pool, config);
+    let sender = ingestion::start(state.clone());
+    let device_ids: Vec<String> = sqlx::query_scalar("SELECT device_id FROM device_credentials")
+        .fetch_all(&state.pool)
+        .await?;
+    for id in device_ids {
+        if let Err(error) = mqtt_listener::connect_device(state.clone(), &id, sender.clone()).await
         {
-            for device in devices {
-                if let (Some(broker), Some(port), Some(topic), Some(username), Some(password)) = (
-                    device.mqtt_broker, device.mqtt_port, device.mqtt_topic, device.mqtt_username, device.mqtt_password
-                ) {
-                    let db_tx_clone = db_tx.clone();
-                    let port_u16 = port as u16;
-                    
-                    let client = network::mqtt_listener::start_mqtt_listener(
-                        &broker,
-                        port_u16,
-                        &topic,
-                        &username,
-                        &password,
-                        move |payload_str| {
-                            match serde_json::from_str::<models::device::DevicePayload>(&payload_str) {
-                                Ok(device_payload) => {
-                                    let _ = db_tx_clone.send(device_payload);
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Gagal mem-parsing payload EKG dari perangkat: {}. Payload: {}",
-                                        e,
-                                        payload_str
-                                    );
-                                }
-                            }
-                        }
-                    );
-                    
-                    let mut clients_map = mqtt_clients.write().await;
-                    clients_map.insert(device.id, client);
-                }
-            }
+            tracing::error!(device_id=id,error=?error,"Device listener could not start")
         }
     }
-
-    // 8. Setup Router Axum untuk REST API + WebSocket
-    let app_state = api::routes::AppState {
-        pool: pool.clone(),
-        mqtt_clients: mqtt_clients.clone(),
-        pacer_tx: pacer_tx.clone(),
-        db_tx: db_tx.clone(),
-        jwt_secret: config.supabase_jwt_secret.clone(),
-        api_url: format!("http://{}:{}", config.host_ip, config.rest_port),
-    };
-
-    let mut app = api::routes::create_router(app_state);
-    
-    // Pasang endpoint WebSocket pada root "/" dan "/ws" untuk mendukung proxy produksi
-    app = app
-        .route("/", axum::routing::get(network::websocket::ws_handler).with_state(clients.clone()))
-        .route("/ws", axum::routing::get(network::websocket::ws_handler).with_state(clients.clone()));
-
-    // 9. Jalankan Server HTTP & WebSocket (gunakan 0.0.0.0 agar dapat diakses via 127.0.0.1 dan localhost)
-    let bind_ip = if config.host_ip == "127.0.0.1" { "0.0.0.0" } else { &config.host_ip };
-    let addr_ws = format!("{}:{}", bind_ip, config.ws_port);
-    let addr_rest = format!("{}:{}", bind_ip, config.rest_port);
-
-    if config.ws_port == config.rest_port {
-        info!("Menjalankan server terpadu Axum di http://{}", addr_ws);
-        let listener = tokio::net::TcpListener::bind(&addr_ws).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+    let housekeeping = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if let Err(error) = ecg_backend::services::storage::process(&housekeeping).await {
+                tracing::error!(?error, "Storage reconciliation failed");
+            }
+            if let Err(error) = recording::expire_commands(&housekeeping).await {
+                tracing::error!(?error, "Command timeout reconciliation failed")
+            }
+        }
+    });
+    let app = create_router(state);
+    let rest_listener = tokio::net::TcpListener::bind(&rest_address).await?;
+    tracing::info!(%rest_address,"REST listener ready");
+    if ws_address == rest_address {
+        axum::serve(rest_listener, app)
+            .with_graceful_shutdown(shutdown())
+            .await?;
     } else {
-        let app_clone = app.clone();
-        
-        let ws_handle = tokio::spawn(async move {
-            info!("Menjalankan server WebSocket di ws://{}", addr_ws);
-            let listener = tokio::net::TcpListener::bind(&addr_ws).await.unwrap();
-            axum::serve(listener, app_clone).await.unwrap();
-        });
-
-        let rest_handle = tokio::spawn(async move {
-            info!("Menjalankan server REST API di http://{}", addr_rest);
-            let listener = tokio::net::TcpListener::bind(&addr_rest).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let _ = tokio::join!(ws_handle, rest_handle);
+        let ws_listener = tokio::net::TcpListener::bind(&ws_address).await?;
+        tracing::info!(%ws_address,"WebSocket listener ready");
+        tokio::try_join!(
+            axum::serve(rest_listener, app.clone()).with_graceful_shutdown(shutdown()),
+            axum::serve(ws_listener, app).with_graceful_shutdown(shutdown())
+        )?;
     }
+    Ok(())
+}
+async fn shutdown() {
+    let _ = tokio::signal::ctrl_c().await;
 }
