@@ -25,11 +25,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tracing::info!("Migrations completed");
         return Ok(());
     }
-    let current = postgres::schema_version(&pool)
+    let report = postgres::schema_report(&pool)
         .await
         .map_err(|error| error.1)?;
-    if current != postgres::SCHEMA_VERSION {
-        return Err(format!("Database schema requires upgrade (current: {current}, required: {}). Review the backup/preflight in docs/rollout.md, then run: cargo run -- --migrate-only",postgres::SCHEMA_VERSION).into());
+    if !report.ready {
+        return Err(format!(
+            "Database schema is not ready: {}. Review docs/schema-upgrade.md and run the read-only check_db preflight",
+            report.issues.join("; ")
+        )
+        .into());
     }
     tokio::fs::create_dir_all(&config.records_root).await?;
     tokio::fs::create_dir_all(&config.uploads_root).await?;
@@ -37,7 +41,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ws_address = format!("{}:{}", config.host_ip, config.ws_port);
     let state = AppState::new(pool, config);
     let sender = ingestion::start(state.clone());
-    let device_ids: Vec<String> = sqlx::query_scalar("SELECT device_id FROM device_credentials")
+    let unmapped = report.unmapped_device_count.unwrap_or_default();
+    if unmapped > 0 {
+        tracing::warn!(
+            count = unmapped,
+            "Device listeners disabled until hardware identities are reviewed"
+        );
+    }
+    let device_ids: Vec<String> = sqlx::query_scalar("SELECT c.device_id FROM device_credentials c JOIN devices d ON d.id=c.device_id WHERE d.hardware_id IS NOT NULL")
         .fetch_all(&state.pool)
         .await?;
     for id in device_ids {
