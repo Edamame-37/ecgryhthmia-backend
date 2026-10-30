@@ -832,10 +832,14 @@ async fn upload(
                 .ok_or_else(|| ApiError::bad("Assigned device required"))?,
         )
         .await?;
-    let device_name: String = sqlx::query_scalar("SELECT name FROM devices WHERE id=$1")
-        .bind(&device)
-        .fetch_one(&state.pool)
-        .await?;
+    let hardware_id: Option<String> =
+        sqlx::query_scalar("SELECT hardware_id FROM devices WHERE id=$1")
+            .bind(&device)
+            .fetch_one(&state.pool)
+            .await?;
+    let hardware_id = hardware_id.ok_or_else(|| {
+        ApiError::conflict("Device hardware identity requires review before import")
+    })?;
     let session = crate::db::postgres::new_id("ses");
     let mut payloads = Vec::new();
     if parts.is_empty() {
@@ -884,7 +888,7 @@ async fn upload(
             value["system"] = system;
         }
         value["session_id"] = json!(session);
-        value["device_id"] = json!(device_name);
+        value["device_id"] = json!(hardware_id);
         value["frame_id"] = json!((index + 1).to_string());
         if value["message_id"].is_null() {
             value["message_id"] = json!(format!("import_{}_{}", session, index + 1));
