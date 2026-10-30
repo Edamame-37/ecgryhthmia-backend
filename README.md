@@ -45,10 +45,15 @@ See [test coverage](tests/README.md), [API/device contracts](docs/contracts.md),
 
 ~~~sh
 cargo run --bin reconcile
+cargo run --bin reconcile -- --inventory
 cargo run --bin reconcile -- --session ses_example --manifest mapping.json
 cargo run --bin reconcile -- --session ses_example --manifest mapping.json --backup /secure/backups --apply
 ~~~
 
 A manifest is an ordered array of {"frame_id":"fra_existing","line_number":1}. Line numbers are one-based source lines. Every existing frame must be mapped once. Dry-run is the default. Apply requires a stopped session and writes durable source/metadata/manifest backups first. It preserves IDs, clinical review/hide/delete fields and original source files. Ambiguous mapping must be investigated manually. It does not invent missing waveforms.
+
+`--inventory` is read-only and reports missing, outside-root, oversized, ambiguous, and unmapped legacy sources without emitting clinical payloads. Before normal startup, `check_db` performs a read-only migration-history, required-column, RLS/grant, forbidden-column, and hardware-mapping readiness check.
+
+Production requires `APP_ENV=production`, explicit HTTPS origins/endpoints, approved MQTT brokers, absolute storage roots, and a backend-only Supabase service role key. Keep `APPLY_MIGRATIONS=false`; migrations are a separate reviewed operator action.
 
 New frame/image files have delayed cleanup reservations. Committed references preserve the file; abandoned writes and queued deletions are reconciled by housekeeping. Failures are logged with a cleanup ID and retried. The cleanup worker canonicalizes every deletion path.
