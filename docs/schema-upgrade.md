@@ -1,5 +1,7 @@
 # Schema startup repair - 28 October 2026
 
+> Historical evidence only. It describes the earlier `2026102708` upgrade. The current `2.0.0-rc.1` source expects `2026102710`; migrations `2026102709` and `2026102710` have not been applied to production by this local refinement. Back up and rehearse them on an isolated restore before a coordinated cutover.
+
 The database configured by the ignored backend `.env` has been upgraded explicitly to schema version `2026102708`. `cargo run --locked --bin ecg-backend` passed the local HTTP startup check against that database. Normal startup still uses `APPLY_MIGRATIONS=false`; schema checks and authentication remain enabled.
 
 ```mermaid
