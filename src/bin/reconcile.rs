@@ -7,12 +7,13 @@ use ecg_backend::{
         payload::{digest, RecordedFrame},
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Row;
 use std::{
     collections::HashSet,
     error::Error,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 #[derive(Deserialize)]
@@ -20,6 +21,18 @@ use std::{
 struct Mapping {
     frame_id: String,
     line_number: usize,
+}
+#[derive(Default, Serialize)]
+struct InventoryReport {
+    mode: &'static str,
+    sessions: usize,
+    legacy_frames: i64,
+    readable_sources: usize,
+    missing_sources: usize,
+    outside_records_root: usize,
+    oversized_sources: usize,
+    ambiguous_sources: usize,
+    unmapped_devices: usize,
 }
 fn argument(name: &str) -> Option<String> {
     let args: Vec<_> = std::env::args().collect();
@@ -37,6 +50,76 @@ fn durable_write(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
     file.sync_all()?;
     Ok(())
 }
+async fn inventory(
+    pool: &sqlx::PgPool,
+    records_root: &Path,
+) -> Result<InventoryReport, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let rows = sqlx::query(
+        "SELECT s.file_path,d.hardware_id,count(f.id) FILTER (WHERE f.storage_path IS NULL) AS legacy_frames FROM sessions s JOIN devices d ON d.id=s.device_id LEFT JOIN frame_records f ON f.session_id=s.id WHERE s.file_path IS NOT NULL GROUP BY s.id,s.file_path,d.hardware_id",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let root = std::fs::canonicalize(records_root)?;
+    let mut report = InventoryReport {
+        mode: "read_only_inventory",
+        sessions: rows.len(),
+        ..InventoryReport::default()
+    };
+    for row in rows {
+        let legacy_frames: i64 = row.get("legacy_frames");
+        report.legacy_frames += legacy_frames;
+        let hardware_id: Option<String> = row.get("hardware_id");
+        if hardware_id.is_none() {
+            report.unmapped_devices += 1;
+        }
+        let source = PathBuf::from(row.get::<String, _>("file_path"));
+        if !source.exists() {
+            report.missing_sources += 1;
+            continue;
+        }
+        let canonical = match std::fs::canonicalize(&source) {
+            Ok(path) if path.starts_with(&root) => path,
+            Ok(_) | Err(_) => {
+                report.outside_records_root += 1;
+                continue;
+            }
+        };
+        if std::fs::metadata(&canonical)?.len() > 100 * 1024 * 1024 {
+            report.oversized_sources += 1;
+            continue;
+        }
+        let mut line_count = 0_i64;
+        let mut frame_ids = HashSet::new();
+        let mut ambiguous = hardware_id.is_none();
+        for line in BufReader::new(std::fs::File::open(canonical)?).lines() {
+            line_count += 1;
+            let payload = line
+                .ok()
+                .and_then(|value| serde_json::from_str::<DevicePayload>(&value).ok());
+            match payload {
+                Some(payload)
+                    if payload.validate().is_ok()
+                        && hardware_id.as_deref() == Some(payload.device_id.as_str())
+                        && frame_ids.insert(payload.frame_id.clone()) => {}
+                _ => ambiguous = true,
+            }
+        }
+        if line_count != legacy_frames {
+            ambiguous = true;
+        }
+        if ambiguous {
+            report.ambiguous_sources += 1;
+        } else {
+            report.readable_sources += 1;
+        }
+    }
+    Ok(report)
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = AppConfig::load().map_err(|error| error.1)?;
@@ -44,6 +127,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .map_err(|error| error.1)?;
     let apply = std::env::args().any(|arg| arg == "--apply");
+    let inventory_requested = std::env::args().any(|arg| arg == "--inventory");
+    if inventory_requested {
+        if apply || argument("--session").is_some() || argument("--manifest").is_some() {
+            return Err("--inventory cannot be combined with mutation or session arguments".into());
+        }
+        let report = inventory(&pool, &config.records_root).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let Some(session_id) = argument("--session") else {
         if apply {
             return Err("--apply requires --session, --manifest and --backup".into());
@@ -54,7 +146,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     validate_id(&session_id).map_err(|error| error.1)?;
     let mut transaction = pool.begin().await?;
-    let session=sqlx::query("SELECT s.*,d.name FROM sessions s JOIN devices d ON d.id=s.device_id WHERE s.id=$1 FOR UPDATE OF s").bind(&session_id).fetch_one(&mut *transaction).await?;
+    let session=sqlx::query("SELECT s.*,d.hardware_id FROM sessions s JOIN devices d ON d.id=s.device_id WHERE s.id=$1 FOR UPDATE OF s").bind(&session_id).fetch_one(&mut *transaction).await?;
     let state: String = session.get("state");
     if matches!(
         state.as_str(),
@@ -118,7 +210,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("Line out of range")?;
         let payload: DevicePayload = serde_json::from_str(line)?;
         payload.validate().map_err(std::io::Error::other)?;
-        if payload.device_id != session.get::<String, _>("name") {
+        let hardware_id = session
+            .get::<Option<String>, _>("hardware_id")
+            .ok_or("Device hardware identity requires operator review")?;
+        if payload.device_id != hardware_id {
             return Err("Source device mismatch; explicit investigation required".into());
         }
         let end = start + payload.duration_s;
