@@ -116,7 +116,7 @@ impl TestContext {
             ("pat_A", "acc_patient", "doc_A", "dev_A"),
             ("pat_B", "acc_other", "doc_B", "dev_B"),
         ] {
-            sqlx::query("INSERT INTO devices(id,name) VALUES($1,$2)")
+            sqlx::query("INSERT INTO devices(id,name,hardware_id) VALUES($1,$2,$2)")
                 .bind(device)
                 .bind(format!("device_{id}"))
                 .execute(&self.state.pool)
@@ -148,6 +148,12 @@ impl TestContext {
             .unwrap()
     }
     pub async fn cleanup(self) {
+        let tasks = std::mem::take(&mut *self.state.mqtt_tasks.lock().await);
+        for task in tasks.into_values() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.state.mqtt_clients.write().await.clear();
         drop(self.app);
         self.state.pool.close().await;
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
