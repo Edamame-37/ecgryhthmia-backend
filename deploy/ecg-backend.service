@@ -7,6 +7,7 @@ User=ecgrhythmia
 Group=ecgrhythmia
 WorkingDirectory=/opt/ecgrhythmia/current
 EnvironmentFile=/etc/ecgrhythmia/backend.env
+Environment=APP_ENV=production
 ExecStart=/opt/ecgrhythmia/current/ecg-backend
 Restart=on-failure
 RestartSec=5
