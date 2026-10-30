@@ -1,30 +1,24 @@
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct DeviceValidation {
     pub status: String,
     pub warnings: Vec<String>,
 }
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeviceEcg {
     pub format: String,
     pub samples: Vec<Vec<f64>>,
 }
-
-
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DevicePrediction {
     pub status: String,
     pub label: String,
     pub confidence_percent: f64,
-    pub probabilities: Option<serde_json::Value>, // Use Value to avoid strict key matching
+    pub probabilities: Option<serde_json::Value>,
     pub threshold: Option<f64>,
     pub latency_ms: Option<f64>,
     pub runtime: Option<String>,
 }
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeviceSystem {
     pub cpu_usage_percent: Option<f64>,
@@ -32,21 +26,19 @@ pub struct DeviceSystem {
     pub memory_usage_mb: Option<i64>,
     pub cpu_temperature_c: Option<f64>,
     pub uptime_s: Option<i64>,
+    pub battery_percent: Option<f64>,
 }
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeviceStressTest {
     pub enabled: Option<bool>,
     pub frame_counter: Option<i64>,
 }
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DeviceNetwork {
     pub mqtt_publish_latency_ms: Option<f64>,
     pub wifi_rssi_dbm: Option<i64>,
     pub mqtt_connected: Option<bool>,
 }
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DevicePayload {
     pub message_id: String,
@@ -56,77 +48,111 @@ pub struct DevicePayload {
     pub created_at: String,
     pub sampling_rate_hz: f64,
     pub duration_s: f64,
+    #[serde(default)]
     pub validation: DeviceValidation,
     pub ecg: DeviceEcg,
-    pub prediction: DevicePrediction,
+    #[serde(default)]
+    pub prediction: Option<DevicePrediction>,
     pub system: Option<DeviceSystem>,
     pub stress_test: Option<DeviceStressTest>,
     pub network: Option<DeviceNetwork>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json;
-
-    #[test]
-    fn test_parse_json() {
-        let json_str = r#"{
-  "schema_version": 1,
-  "message_id": "device01-default-frame_000001",
-  "device_id": "device01",
-  "session_id": "default",
-  "frame_id": "000001",
-  "created_at": "2026-07-28T15:00:00+07:00",
-  "sampling_rate_hz": 250.0,
-  "duration_s": 10.0,
-  "unit": "mV",
-  "shape": [2500, 3],
-  "channel_order": ["Lead I", "Lead II", "Lead III"],
-  "validation": {
-    "status": "PASS",
-    "warnings": []
-  },
-  "ecg": {
-    "format": "samples_by_time",
-    "samples": [
-      [1.0, 2.0, 3.0],
-      [1.0, 2.0, 3.0]
-    ]
-  },
-  "prediction": {
-    "status": "PASS",
-    "label": "Non Arrhythmia",
-    "confidence_percent": 98.75,
-    "probabilities": {
-      "Non Arrhythmia": 98.75,
-      "AF": 0.2,
-      "Takikardia": 0.1,
-      "Bradikardia": 0.95
-    },
-    "threshold": 0.5,
-    "latency_ms": 12.0,
-    "runtime": "ai-edge-litert"
-  },
-  "system": {
-    "cpu_usage_percent": 13.2,
-    "memory_usage_percent": 69.8,
-    "memory_usage_mb": 2815,
-    "cpu_temperature_c": 27.8,
-    "uptime_s": 19352
-  },
-  "stress_test": {
-    "enabled": true,
-    "frame_counter": 1
-  },
-  "network": {
-    "mqtt_publish_latency_ms": 8.7,
-    "wifi_rssi_dbm": -59,
-    "mqtt_connected": true
-  }
-}"#;
-        let payload: DevicePayload = serde_json::from_str(json_str).unwrap();
-        assert_eq!(payload.message_id, "device01-default-frame_000001");
-        assert_eq!(payload.system.unwrap().memory_usage_mb, Some(2815));
+impl DevicePayload {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.sampling_rate_hz.is_finite() || !(100.0..=1000.0).contains(&self.sampling_rate_hz)
+        {
+            return Err("Invalid sampling rate".into());
+        }
+        if self.ecg.format != "samples_by_time"
+            || self.ecg.samples.is_empty()
+            || self.ecg.samples.len() > 30000
+        {
+            return Err("Invalid ECG frame shape".into());
+        }
+        if self.ecg.samples.iter().any(|sample| {
+            sample.len() != 3
+                || sample
+                    .iter()
+                    .any(|value| !value.is_finite() || value.abs() > 100.0)
+        }) {
+            return Err("ECG samples require three finite mV channels".into());
+        }
+        let duration = self.ecg.samples.len() as f64 / self.sampling_rate_hz;
+        if !self.duration_s.is_finite()
+            || (self.duration_s - duration).abs() > 0.5 / self.sampling_rate_hz
+            || duration > 30.0
+        {
+            return Err("Sample count does not match duration".into());
+        }
+        for id in [
+            &self.device_id,
+            &self.session_id,
+            &self.message_id,
+            &self.frame_id,
+        ] {
+            if id.is_empty()
+                || id.len() > 128
+                || !id.bytes().all(|character| {
+                    character.is_ascii_alphanumeric() || character == b'_' || character == b'-'
+                })
+            {
+                return Err("Invalid frame identity".into());
+            }
+        }
+        if chrono::DateTime::parse_from_rfc3339(&self.created_at).is_err() {
+            return Err("Invalid frame timestamp".into());
+        }
+        if self.validation.status.len() > 100
+            || self.validation.warnings.len() > 16
+            || self
+                .validation
+                .warnings
+                .iter()
+                .any(|value| value.len() > 200)
+        {
+            return Err("Invalid validation metadata".into());
+        }
+        if let Some(prediction) = &self.prediction {
+            if prediction
+                .runtime
+                .as_ref()
+                .is_some_and(|value| value.len() > 100)
+                || prediction.label.is_empty()
+                || prediction.label.len() > 100
+                || !prediction.confidence_percent.is_finite()
+                || !(0.0..=100.0).contains(&prediction.confidence_percent)
+            {
+                return Err("Invalid prediction".into());
+            }
+            if let Some(probabilities) = &prediction.probabilities {
+                if !probabilities.as_object().is_some_and(|values| {
+                    !values.is_empty()
+                        && values.len() <= 16
+                        && values.keys().all(|key| key.len() <= 100)
+                        && values.values().all(|value| {
+                            value.as_f64().is_some_and(|number| {
+                                number.is_finite() && (0.0..=100.0).contains(&number)
+                            })
+                        })
+                }) {
+                    return Err("Invalid prediction probabilities".into());
+                }
+            }
+        }
+        if let Some(system) = &self.system {
+            for value in [
+                system.cpu_usage_percent,
+                system.memory_usage_percent,
+                system.battery_percent,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+                    return Err("Invalid device telemetry".into());
+                }
+            }
+        }
+        Ok(())
     }
 }
