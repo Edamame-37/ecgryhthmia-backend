@@ -1,0 +1,120 @@
+   Compiling ecg-backend v0.2.0 (<workspace>\ecgrhythmia-backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.42s
+     Running unittests src\lib.rs (target\debug\deps\ecg_backend-258f5d403abaf95f.exe)
+
+running 3 tests
+test api::error::tests::missing_rows_return_not_found_without_database_failure_logs ... ok
+test api::error::tests::unavailable_database_returns_service_unavailable_and_logs_error ... ok
+test api::jwks::tests::removed_signing_key_is_not_served_after_ttl ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\bin\check_db.rs (target\debug\deps\check_db-1a73c43af182e020.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\check_sessions.rs (target\debug\deps\check_sessions-885dd5afb10099a5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\ecg_backend-7a59a82779de48ad.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\reconcile.rs (target\debug\deps\reconcile-5281eab86ec10199.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\account_tests.rs (target\debug\deps\account_tests-25225e94824a8473.exe)
+
+running 3 tests
+test provisioning_creates_parent_account_first_and_retry_is_idempotent ... ok
+test impersonation_is_actor_bound_scoped_audited_and_revocable ... ok
+test account_token_cutoff_and_rate_limit_are_enforced ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+     Running tests\auth_tests.rs (target\debug\deps\auth_tests-3c9d4c6fb23017a8.exe)
+
+running 1 test
+test dynamic_es256_valid_expired_tampered_and_invalid_claims ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests\ingestion_tests.rs (target\debug\deps\ingestion_tests-7e790f825faa1e06.exe)
+
+running 3 tests
+test csv_channel_mapping_is_exact_and_bad_values_are_rejected ... ok
+test session_channels_do_not_cross_and_dropped_subscribers_are_reclaimed ... ok
+test wrong_listener_stale_out_of_order_and_stopped_frames_are_rejected ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests\integration_tests.rs (target\debug\deps\integration_tests-0e4bb209c30a7808.exe)
+
+running 4 tests
+test database_guard_rejects_unknown_targets_before_connecting ... ok
+test worker_persists_sequence_and_rejects_replay ... ok
+test identity_and_resource_matrix ... ok
+test unknown_roles_and_revoked_accounts_fail_closed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+     Running tests\migration_tests.rs (target\debug\deps\migration_tests-d63564aac710d5ac.exe)
+
+running 4 tests
+test legacy_upgrade_preserves_data_and_moves_private_credentials ... ok
+test reconciliation_requires_explicit_mapping_backs_up_and_preserves_reviews ... ok
+test duplicate_legacy_profiles_and_histories_are_preserved_but_ambiguous_login_is_denied ... ok
+test unknown_or_modified_history_is_rejected_without_rewriting_it ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+     Running tests\recording_tests.rs (target\debug\deps\recording_tests-b42ee7087d97e4ae.exe)
+
+running 2 tests
+test orphan_cleanup_preserves_referenced_data_and_never_leaves_the_storage_root ... ok
+test commands_are_idempotent_and_only_acknowledgments_change_recording_state ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+
+     Running tests\security_tests.rs (target\debug\deps\security_tests-be2d02e10f9f8fc0.exe)
+
+running 9 tests
+test signed_user_metadata_never_grants_admin ... ok
+test hidden_deleted_frames_do_not_reappear_in_records_or_export ... ok
+test pairing_code_is_scoped_expiring_and_single_use ... ok
+test private_tables_have_rls_and_no_browser_grants ... ok
+test private_routes_deny_anonymous_and_cross_patient_access ... ok
+test ambiguous_private_image_references_fail_closed_and_deleted_papers_are_ignored ... ok
+test traversal_and_corrupt_storage_fail_closed ... ok
+test private_images_accept_canonical_and_legacy_references_with_the_same_access_scope ... ok
+test private_images_require_an_exact_supported_reference_before_reading_a_file ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.69s
+
+     Running tests\stream_tests.rs (target\debug\deps\stream_tests-5e11166dcf9b7dbc.exe)
+
+running 3 tests
+test socket_capacity_is_per_actor_and_released_on_disconnect ... ok
+test slow_device_does_not_delay_another_devices_first_packet ... ok
+test websocket_tickets_origin_scope_reuse_and_revocation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.94s
+
+     Running tests\upload_tests.rs (target\debug\deps\upload_tests-ea57a9b938413566.exe)
+
+running 2 tests
+test multipart_import_orders_frames_and_uses_sample_duration_and_unknown_prediction ... ok
+test malformed_upload_does_not_create_a_partial_success_session ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+
