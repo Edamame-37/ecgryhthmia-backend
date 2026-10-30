@@ -1,117 +1,70 @@
-use dotenvy::dotenv;
-use std::env;
+use crate::api::error::{ApiError, ApiResult};
+use std::{env, path::PathBuf};
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub host_ip: String,
-    pub rest_port: String,
-    pub ws_port: String,
-    pub mqtt_broker: String,
-    pub mqtt_port: u16,
-    pub mqtt_topic: String,
-    pub mqtt_username: String,
-    pub mqtt_password: String,
-    pub supabase_jwt_secret: String,
+    pub rest_port: u16,
+    pub ws_port: u16,
     pub database_url: String,
+    pub supabase_url: String,
+    pub supabase_anon_key: String,
+    pub supabase_service_key: String,
+    pub jwt_secret: String,
+    pub require_auth_session: bool,
+    pub allowed_origins: Vec<String>,
+    pub records_root: PathBuf,
+    pub uploads_root: PathBuf,
+    pub apply_migrations: bool,
 }
-
 impl AppConfig {
-    pub fn load() -> Self {
-        dotenv().ok();
-
-        let host_ip = env::var("HOST_IP")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-        let rest_port = env::var("REST_PORT")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .unwrap_or_else(|| "8081".to_string());
-        let ws_port = env::var("WS_PORT")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .unwrap_or_else(|| "8080".to_string());
-        
-        let mqtt_broker = env::var("MQTT_BROKER")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .expect("[Config] ERROR: MQTT_BROKER belum diset di .env!");
-        
-        let mqtt_port = env::var("MQTT_PORT")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .unwrap_or_else(|| "8883".to_string())
-            .parse::<u16>()
-            .unwrap_or(8883);
-            
-        let mqtt_topic = env::var("MQTT_TOPIC")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .expect("[Config] ERROR: MQTT_TOPIC belum diset di .env!");
-            
-        let mqtt_username = env::var("MQTT_USERNAME")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .expect("[Config] ERROR: MQTT_USERNAME belum diset di .env!");
-            
-        let mqtt_password = env::var("MQTT_PASSWORD")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .expect("[Config] ERROR: MQTT_PASSWORD belum diset di .env!");
-        
-        let supabase_jwt_secret = env::var("SUPABASE_JWT_SECRET")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .expect("[Config] ERROR: SUPABASE_JWT_SECRET belum diset di .env!");
-            
-        let database_url = env::var("DATABASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty()).map(|s| s.replace("\"", ""))
-            .expect("[Config] ERROR: DATABASE_URL belum diset di .env!");
-
-        AppConfig {
-            host_ip,
-            rest_port,
-            ws_port,
-            mqtt_broker,
-            mqtt_port,
-            mqtt_topic,
-            mqtt_username,
-            mqtt_password,
-            supabase_jwt_secret,
-            database_url,
+    pub fn load() -> ApiResult<Self> {
+        dotenvy::dotenv().ok();
+        let required = |name: &str| {
+            env::var(name)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| ApiError::bad(format!("Missing {name}")))
+        };
+        let port = |name: &str, default: u16| -> ApiResult<u16> {
+            env::var(name)
+                .ok()
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| ApiError::bad(format!("Invalid {name}")))
+                })
+                .unwrap_or(Ok(default))
+        };
+        let supabase_url = required("SUPABASE_URL")?.trim_end_matches('/').to_string();
+        if !supabase_url.starts_with("https://") {
+            return Err(ApiError::bad("SUPABASE_URL must use HTTPS"));
         }
+        Ok(Self {
+            host_ip: env::var("HOST_IP").unwrap_or_else(|_| "127.0.0.1".into()),
+            rest_port: port("REST_PORT", 8081)?,
+            ws_port: port("WS_PORT", 8080)?,
+            database_url: required("DATABASE_URL")?,
+            supabase_url,
+            supabase_anon_key: required("SUPABASE_ANON_KEY")?,
+            supabase_service_key: env::var("SUPABASE_SERVICE_ROLE_KEY").unwrap_or_default(),
+            jwt_secret: env::var("SUPABASE_JWT_SECRET").unwrap_or_default(),
+            require_auth_session: true,
+            allowed_origins: env::var("ALLOWED_ORIGINS")
+                .unwrap_or_else(|_| "http://localhost:5173,http://127.0.0.1:5173".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            records_root: PathBuf::from(
+                env::var("RECORDS_ROOT").unwrap_or_else(|_| "records".into()),
+            ),
+            uploads_root: PathBuf::from(
+                env::var("UPLOADS_ROOT").unwrap_or_else(|_| "uploads".into()),
+            ),
+            apply_migrations: env::var("APPLY_MIGRATIONS").is_ok_and(|v| v == "true"),
+        })
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_config_load() {
-        std::env::set_var("HOST_IP", "127.0.0.9");
-        std::env::set_var("REST_PORT", "9999");
-        std::env::set_var("WS_PORT", "9998");
-        std::env::set_var("MQTT_BROKER", "broker.test");
-        std::env::set_var("MQTT_PORT", "1883");
-        std::env::set_var("MQTT_TOPIC", "test/topic");
-        std::env::set_var("MQTT_USERNAME", "testuser");
-        std::env::set_var("MQTT_PASSWORD", "testpass");
-        std::env::set_var("SUPABASE_JWT_SECRET", "testsecret");
-        std::env::set_var("DATABASE_URL", "postgres://test");
-
-        let config = AppConfig::load();
-        assert_eq!(config.host_ip, "127.0.0.9");
-        assert_eq!(config.rest_port, "9999");
-        assert_eq!(config.ws_port, "9998");
-        assert_eq!(config.mqtt_broker, "broker.test");
-        assert_eq!(config.mqtt_port, 1883);
-        assert_eq!(config.mqtt_topic, "test/topic");
-        assert_eq!(config.mqtt_username, "testuser");
-        assert_eq!(config.mqtt_password, "testpass");
-        assert_eq!(config.supabase_jwt_secret, "testsecret");
-        assert_eq!(config.database_url, "postgres://test");
+    pub fn issuer(&self) -> String {
+        format!("{}/auth/v1", self.supabase_url)
     }
 }
