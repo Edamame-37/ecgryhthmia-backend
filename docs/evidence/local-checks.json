@@ -1,0 +1,29 @@
+{
+  "scope": "local_only",
+  "verified_at_utc": "2026-10-30T11:23:06.781231+00:00",
+  "commands": [
+    "cargo test --locked --all-targets -j 2 (TEST_DATABASE_URL=<loopback ecg_test>)",
+    "cargo fmt --all -- --check",
+    "cargo clippy --locked --all-targets -j 2 -- -D warnings",
+    "python -m unittest tests.deployment_tests",
+    "cargo audit --deny warnings",
+    "cargo run --locked --bin check_db (isolated schema, read-only)"
+  ],
+  "results": {
+    "tests": "39 passed; 0 failed; 0 ignored",
+    "deployment_tests": "3 passed",
+    "format": "passed",
+    "clippy": "passed",
+    "audit": "passed",
+    "schema_report": {
+      "current_version": 2026102710,
+      "expected_version": 2026102710,
+      "ready": true,
+      "acquisition_ready": true,
+      "unmapped_device_count": 0,
+      "issues": []
+    }
+  },
+  "source_and_test_files_sha256": "9e2916208d71e0f33561d881a3e67944f4271aa0e9763039a4abf57d6f857e04",
+  "production_changed": false
+}
