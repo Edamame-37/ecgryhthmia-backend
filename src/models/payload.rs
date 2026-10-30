@@ -1,64 +1,31 @@
+use crate::models::device::DevicePayload;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use crate::models::device::{DeviceSystem, DeviceNetwork, DeviceStressTest, DevicePrediction, DeviceValidation};
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RawECGData {
-    pub time: Vec<f64>,
-    pub ch1: Vec<f64>, // Lead I (Murni milivolt)
-    pub ch2: Vec<f64>, // Lead II (Murni milivolt)
-    pub ch3: Vec<f64>, // Lead III / aVR / Kalibrasi
+pub struct RecordedFrame {
+    pub id: String,
+    pub device_id: String,
+    pub patient_id: String,
+    pub session_id: String,
+    pub frame_number: i64,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub payload: DevicePayload,
 }
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ECGDataPayload {
-    pub raw: RawECGData,
-    pub classification_result: String,
-    pub confidence: String,
-    pub anomaly_indices: Vec<usize>,
-
-    // New fields forwarded from device
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation: Option<DeviceValidation>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prediction_details: Option<DevicePrediction>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<DeviceSystem>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<DeviceNetwork>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stress_test: Option<DeviceStressTest>,
+#[derive(Serialize, Deserialize)]
+pub struct IntegrityEnvelope {
+    pub r#type: String,
+    pub content: String,
+    pub sha256_checksum: String,
 }
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ServerMessage {
-    pub r#type: String, 
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub measurement_id: Option<String>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<String>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha256_checksum: Option<String>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_payload: Option<ECGDataPayload>,
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Vec<Value>>, 
-    
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+pub fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+pub fn encode_packet(value: &serde_json::Value) -> Result<String, serde_json::Error> {
+    let content = serde_json::to_string(value)?;
+    serde_json::to_string(&IntegrityEnvelope {
+        r#type: "ecg_packet".into(),
+        sha256_checksum: digest(content.as_bytes()),
+        content,
+    })
 }
