@@ -1,17 +1,10 @@
-use sqlx::postgres::PgPoolOptions;
-
 #[tokio::main]
-async fn main() -> Result<(), sqlx::Error> {
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect("postgresql://postgres.xzjxkplsgzcvdcjdhpcp:bapakkauperangbarengidf@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres?sslmode=require").await?;
-
-    let rows = sqlx::query!("SELECT id, file_path FROM sessions LIMIT 10")
-        .fetch_all(&pool)
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&pool)
         .await?;
-
-    for row in rows {
-        println!("Session ID: {}, file_path: {:?}", row.id, row.file_path);
-    }
+    println!("Recorded sessions: {count}");
     Ok(())
 }
