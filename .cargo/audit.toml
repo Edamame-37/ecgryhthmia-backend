@@ -1,0 +1,5 @@
+[advisories]
+# SQLx keeps its optional MySQL graph in Cargo.lock. MySQL and rsa are not compiled:
+# cargo tree -i rsa --target all => nothing to print.
+# PostgreSQL only; JWT uses aws-lc-rs. Review by 2026-11-27 or on feature changes.
+ignore = ["RUSTSEC-2023-0071"]
