@@ -1,0 +1,5 @@
+[
+ {"version":1,"description":"initial","checksum":"f742f1415932a03bd590e2bebb03f551fefa04e3fbd42f7309c2c6ee2c0db3062d4c36fb86c1b12a06e6b33109b58edd"},
+ {"version":2,"description":"postgres evolution","checksum":"4b0f001fb24e8cdc10eb4f81a11f6fe66b44aeec2cc0c0de7865812fa53ba0fa74021718d1481ddce479d0fba9aa6574"},
+ {"version":3,"description":"supabase auth link","checksum":"07afb84d9ee23c47ac5e7bc087028f8f9948c70d9d7f72458e074bb44202a4bfb6e83c884b6c2c2ace2a9607cd2d31c4"}
+]
