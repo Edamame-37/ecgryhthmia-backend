@@ -1,0 +1,48 @@
+{
+  "verified_at_utc": "2026-10-28T12:06:42.265085+00:00",
+  "baseline_commit": "480567a0068233e75e339ad1a3483a59403b8dc2",
+  "verification_target": "uncommitted local working tree",
+  "source_and_test_files_sha256": "aa7181f96f9211ca168b90e39e56a74871de5ff453a0f5f717db66a324822824",
+  "source_and_test_file_count": 54,
+  "host": "Windows x86_64",
+  "tools": {
+    "rustc": "1.96.0",
+    "cargo": "1.96.0",
+    "node": "24.16.0",
+    "npm": "11.13.0",
+    "python": "3.14.6"
+  },
+  "results": {
+    "rust_tests_passed": 34,
+    "ignored_tests": 0,
+    "deployment_tests_passed": 3,
+    "fmt": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "release_build": "passed on 2026-10-27 before startup repair; not rerun for this repair",
+    "cargo_audit": "passed on 2026-10-27 with documented RSA inactive-graph exception; not rerun for this follow-up",
+    "debug_build": "passed"
+  },
+  "production_changed": true,
+  "external_acceptance": "Configured database upgraded; localhost startup passed; remaining Auth/device/remote deployment acceptance pending; see docs/schema-upgrade.md and docs/rollout.md",
+  "fingerprint_algorithm": "SHA256: sorted relative UTF-8 path, NUL, raw file bytes, NUL; src/**/*.rs, src/db/*.json, tests/**/*.rs, migrations/*.sql",
+  "configured_database_schema_version": 2026102708,
+  "remote_application_deployed": false,
+  "private_image_follow_up": {
+    "configured_database_verification": "read-only transaction; no migration or account/file-reference updates",
+    "legacy_absolute_profile_references": 2,
+    "old_exact_lookup_matches": 0,
+    "new_unique_lookup_matches": 2,
+    "ambiguous_lookup_matches": 0,
+    "matching_local_files": 2,
+    "photo_regression_tests": "canonical/HTTP/HTTPS; owner, linked doctor and admin; anonymous and unrelated roles; exact path only; ambiguity; deleted papers; traversal",
+    "database_error_regression_tests": "RowNotFound returns 404 without failure log; PoolClosed returns 503 with ERROR log",
+    "local_isolated_startup": {
+      "health": 200,
+      "readiness": 200,
+      "anonymous_identity": 401,
+      "error_logs": 0
+    },
+    "configured_database_changed": false,
+    "remote_application_deployed": false
+  }
+}
