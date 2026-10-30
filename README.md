@@ -1,205 +1,54 @@
-# ECG Rhythmia - Sinkronisasi & Integrasi Frontend
+# ECGRhythmia backend
 
-Dokumentasi ini berfokus pada integrasi sisi **Frontend (React)** untuk memvisualisasikan data Elektrokardiogram (EKG) secara *real-time*, serta bagaimana frontend melakukan sinkronisasi dengan backend.
+Rust/Axum API, PostgreSQL, authenticated session-scoped WebSockets and MQTT ingestion. Browser clients use Supabase Auth; private database tables are accessed exclusively through this API.
 
-## 💻 Integrasi Frontend (React)
+## Setup
 
-Aplikasi frontend (React/TypeScript) bertanggung jawab untuk dua fungsi utama: memvisualisasikan *streaming* data EKG yang dikirim oleh backend dan memuat daftar dataset (records) yang tersedia.
+Copy .env.example to .env and supply your own connection settings. Never reuse a production URL for tests. Install Rust stable and the native TLS build prerequisites (Linux: pkg-config, libssl-dev and current ca-certificates; Windows: MSVC build tools/CMake). MQTT uses verified native TLS on port 8883; SQLx/HTTP use rustls.
 
-### 1. Komunikasi WebSocket (Streaming Real-Time)
-- **Koneksi:** Frontend terhubung ke server WebSocket backend pada alamat `ws://127.0.0.1:8080`.
-- **Format Data:** Data diterima dalam format JSON. Struktur data (Payload) dari backend dirancang agar 100% sejajar dengan antarmuka TypeScript di sisi frontend (misal: `ecgTypes.ts`), khususnya pada objek `RawECGData` (berisi properti array `time`, `ch1`, `ch2`, `ch3`).
-- **Render Visual:** Data yang diterima sudah dalam bentuk **murni milivolt (mV)** sehingga frontend tidak perlu lagi melakukan perhitungan kalibrasi multiplier/gain (*zero-overhead render*). Komponen grafik pada React cukup me-render nilai mentah ini secara langsung ke dalam bentuk gelombang EKG.
+Migrations are explicit:
 
-### 2. Pengambilan Data Dataset (REST API)
-- **Koneksi HTTP:** Menggunakan pustaka *fetch* bawaan peramban atau Axios, frontend melakukan *request* HTTP `GET` ke REST API backend di `http://127.0.0.1:8081/api/records`.
-- **Fungsi:** Berguna untuk memuat dan menampilkan daftar ketersediaan file CSV dataset (seperti dari folder Chapman, PTB-XL, atau data simulasi Prosim) pada menu navigasi (sidebar/dropdown) di aplikasi React.
-- **CORS Terintegrasi:** REST API sisi server telah dikonfigurasi untuk mengizinkan *Cross-Origin Resource Sharing (CORS)* untuk domain produksi (`https://ecgrhythmia.cloud`, `https://www.ecgrhythmia.cloud`) dengan metode (`GET`, `POST`, `PUT`, `DELETE`, `OPTIONS`), header (`Content-Type`, `Authorization`, `Accept`), serta memperbolehkan pengiriman kredensial (*allow credentials*).
+~~~sh
+cargo run --bin ecg-backend -- --migrate-only
+cargo run --bin ecg-backend
+~~~
 
----
+Existing deployments require the backup, schema and identity checks in [rollout.md](docs/rollout.md) before migrating. The schema changes are incompatible with old binaries. Do not run an old schema initializer or frontend SQL scripts. The approved upgrade of the currently configured database and the preserved legacy identity conflicts are recorded in [schema-upgrade.md](docs/schema-upgrade.md).
 
-## 📂 Struktur Folder Frontend (`arrhythmia-detection-dashboard`)
+## MQTT configuration
 
-Proyek antarmuka ini dibangun menggunakan **React**, **TypeScript**, **Vite**, dan **Tailwind CSS**. Arsitektur internal aplikasi (*Clean Architecture*) disusun agar kode lebih modular dan mudah dipelihara.
+Set `MQTT_ALLOWED_BROKERS` in the backend `.env` to a comma-separated list of trusted broker hostnames, without a URL scheme, port or path. Restart the backend after changing this setting. TLS port 8883 and exact topics are required.
 
-```text
-c:\arrhythmia-detection-dashboard\
-├── package.json               # Konfigurasi proyek, dependensi npm, dan script build/dev
-├── vite.config.ts             # Konfigurasi Vite (bundler frontend)
-├── tailwind.config.js         # Konfigurasi desain, warna, dan utilitas Tailwind CSS
-├── postcss.config.js          # Pengaturan PostCSS untuk Tailwind
-├── tsconfig.json              # Konfigurasi root TypeScript
-├── index.html                 # Halaman utama aplikasi (Entry HTML)
-├── public/                    # Aset statis yang tidak diproses oleh bundler
-└── src/                       # Kode sumber (*source code*) utama React
-    ├── main.tsx               # Titik awal masuk (Entry point) React (mounting ke index.html)
-    ├── App.tsx                # Komponen root aplikasi
-    ├── App.css / index.css    # Gaya global Tailwind
-    ├── application/           # Lapisan Application (Use cases, custom hooks, state management)
-    ├── core/                  # Lapisan Core (Tipe data, interface TypeScript, konfigurasi)
-    ├── data/                  # Lapisan Data (Akses API eksternal, klien WebSocket)
-    ├── presentation/          # Lapisan Presentation (Komponen UI React, layout, halaman)
-    ├── workers/               # (Opsional) Web Workers untuk komputasi asinkron (multithreading UI)
-    └── assets/                # Aset proyek lokal (gambar, ikon SVG, dsb)
+```dotenv
+MQTT_ALLOWED_BROKERS=broker.example.org
 ```
 
-## ⚙️ Cara Setup & Menjalankan Backend (Rust - Production-Ready)
+Each device's broker, port, exact frame topic and credentials come from the private `device_credentials` database table. Configure them through the administrator device API. Legacy `.env` settings `MQTT_BROKER`, `MQTT_PORT` and `MQTT_TOPIC` do not configure these listeners. A legacy wildcard such as `ecgrhythmia/#` must not be copied into a device's frame topic; use its exact topic, for example `ecgrhythmia/device01`.
 
-Backend aplikasi ini dibangun menggunakan **Rust** dengan framework web asinkron **Axum**, sistem database connection pooling **r2d2** (terintegrasi SQLite + SQLCipher), dan logging terstruktur menggunakan **tracing**.
+When startup reports `MQTT broker must be allowlisted and use TLS port 8883; wildcard topics are prohibited`, compare the device's database hostname with `MQTT_ALLOWED_BROKERS`, confirm port 8883, and check that its topic contains neither `#` nor `+`. MQTT credentials and the backend `.env` remain excluded from Git.
 
-### Persyaratan (Prerequisites)
-- **Rust & Cargo**: Instal Rust melalui [rustup.rs](https://rustup.rs/).
-- **SQLite**: Database SQLite tertanam terenkripsi via SQLCipher, tidak memerlukan server terpisah.
+## Checks
 
-### Langkah-langkah Instalasi & Konfigurasi
-1. **Navigasi ke Direktori**:
-   ```bash
-   cd \ecgrhythmia-backend
-   ```
-2. **Konfigurasi Berkas `.env`**:
-   Buat berkas `.env` di root direktori backend Anda berdasarkan struktur berikut (kosongkan nilai kredensial untuk deployment produksi demi keamanan):
-   ```env
-   HOST_IP=127.0.0.1
-   REST_PORT=8081
-   WS_PORT=8080
+~~~powershell
+$env:TEST_DATABASE_URL='postgres://postgres:test-only@127.0.0.1:5432/ecg_test'
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo audit --deny warnings
+~~~
 
-   # Konfigurasi & Kredensial Medis (Diisi pada saat Deployment)
-   MQTT_BROKER=
-   MQTT_PORT=8883
-   MQTT_TOPIC=
-   MQTT_USERNAME=
-   MQTT_PASSWORD=
+Tests require loopback and a database named ecg_test before opening any connection. They create independent schemas and temporary recording directories. Missing TEST_DATABASE_URL is a failure. The database fixture role needs CREATE SCHEMA; disposable test clusters should also contain NOLOGIN roles anon and authenticated.
 
-   # Kunci Keamanan & Sesi
-   JWT_SECRET=
-   SQLITE_KEY=
-   DB_PATH=database.db
-   ```
-   *Catatan:* Jika `REST_PORT` dan `WS_PORT` disamakan (misalnya keduanya `8080`), server Axum akan otomatis menyatu pada satu port tunggal (REST API melayani di `/api` dan WebSocket di `/`).
+See [test coverage](tests/README.md), [API/device contracts](docs/contracts.md), [finding status](docs/audit-remediation.md) and [dependency triage](docs/dependencies.md).
 
- 3. **Build & Run**:
-   ```bash
-   cargo run
-   ```
-   *Cargo akan mengunduh dependensi (crates), melakukan kompilasi asinkron, menjalankan migrasi database otomatis, dan menyalakan server.*
+## Maintenance
 
-### 4. Pengujian & Otomatisasi Rilis (Testing & Build Automation)
+~~~sh
+cargo run --bin reconcile
+cargo run --bin reconcile -- --session ses_example --manifest mapping.json
+cargo run --bin reconcile -- --session ses_example --manifest mapping.json --backup /secure/backups --apply
+~~~
 
-Aplikasi ini dilengkapi dengan pengujian unit dan pengujian integrasi yang komprehensif untuk menjamin stabilitas sistem sebelum dilakukan kompilasi rilis produksi (build) dan deployment.
+A manifest is an ordered array of {"frame_id":"fra_existing","line_number":1}. Line numbers are one-based source lines. Every existing frame must be mapped once. Dry-run is the default. Apply requires a stopped session and writes durable source/metadata/manifest backups first. It preserves IDs, clinical review/hide/delete fields and original source files. Ambiguous mapping must be investigated manually. It does not invent missing waveforms.
 
-#### A. Kategori Pengujian
-1. **Unit Tests (Pengujian Unit):**
-   - **Config Loader (`src/config.rs`):** Memvalidasi pembacaan berkas `.env` dan fallback nilai default jika variabel tidak tersedia.
-   - **CSV Reader (`src/data/csv_reader.rs`):** Memverifikasi pembacaan dataset EKG statis dan penanganan data kosong atau tidak valid (fallback).
-   - **SQLite Database (`src/db/sqlite.rs`):** Menguji migrasi skema tabel database di memori, registrasi admin/device bawaan, serta kebenaran fungsi generator ID kustom (`generate_custom_id`).
-   - **Device Parser (`src/models/device.rs`):** Memverifikasi parsing dan pemetaan JSON payload dari perangkat keras.
-
-2. **Integration Tests (Pengujian Integrasi - `tests/integration_tests.rs`):**
-   - **REST API Integration:** Menyosialisasikan pemanggilan REST API di memori (registrasi, login, dll.) tanpa harus mem-bind socket port riil menggunakan `tower::Service`.
-   - **Database Worker Integration:** Menguji antrean asinkron background writer database worker untuk mencatat sesi secara persisten dan membuat file JSONL rekaman.
-   - **ECG Pacer Integration:** Memverifikasi pembagian data (slicing) signal EKG dan broadcast via WebSocket klien.
-
-#### B. Menjalankan Pengujian Manual
-- **Di Windows (PowerShell):**
-  ```powershell
-  $env:OPENSSL_DIR="d:\Project\ecgrhythmia-backend\openssl-custom"; $env:OPENSSL_STATIC="1"; cargo test
-  ```
-- **Di Linux (Terminal):**
-  ```bash
-  cargo test
-  ```
-
-#### C. Pengujian Otomatis Sebelum Build & Deploy (Sangat Direkomendasikan)
-Untuk menjamin tidak ada kode rusak yang masuk ke tahap kompilasi rilis, kami menyediakan skrip otomatisasi **`test_and_build.ps1`** (Windows) dan **`test_and_build.sh`** (Linux). Skrip ini akan melakukan hal berikut secara berurutan:
-1. Menjalankan seluruh pengujian unit & integrasi.
-2. Menganalisis log hasil uji dan **melampirkan laporan jumlah test yang berhasil (passed) dan gagal (failed)** pada konsol.
-3. **Jika ada pengujian yang gagal (atau terjadi error kompilasi):** Skrip akan langsung menghentikan proses (*abort*) untuk mencegah pembangunan biner yang rusak.
-4. **Jika seluruh pengujian lolos:** Skrip melanjutkan dengan mengompilasi biner produksi teroptimasi menggunakan `cargo build --release`.
-
-##### Cara Menjalankan:
-- **Di Windows (PowerShell):**
-  ```powershell
-  .\test_and_build.ps1
-  ```
-  Output biner produksi (`.exe`) akan tersedia di `target\release\ecg-backend.exe`.
-
-- **Di Linux (Terminal):**
-  ```bash
-  chmod +x test_and_build.sh
-  ./test_and_build.sh
-  ```
-  Output biner produksi akan tersedia di `target/release/ecg-backend`.
-
----
-
-## 🗄️ Pemakaian Database (SQLite + SQLCipher)
-
-Aplikasi ini menggunakan database terenkripsi SQLite (`database.db`) yang otomatis dibuat pada direktori utama backend.
-
-- **Fungsi Utama**: Menyimpan data persisten yang mencakup **Akun Pengguna**, **Profil Dokter & Pasien**, **Status Perangkat**, dan **Riwayat Sesi Medis**.
-- **Database Connection Pooling (`r2d2`)**: Akses database dikelola menggunakan connection pool terbagi untuk meningkatkan kecepatan pemrosesan data paralel dan mencegah error *database locked*.
-- **Enkripsi Kunci SQLCipher**: Database diamankan dengan mengenkripsi seluruh file menggunakan `SQLITE_KEY` yang diinisialisasi otomatis pada setiap koneksi baru di pool.
-- **Inisialisasi & Migrasi Otomatis**: Saat backend pertama kali dijalankan, sistem akan otomatis mengeksekusi migrasi skema tabel (jika belum ada) dan mendaftarkan perangkat default agar siap digunakan.
-
----
-
-## 🌐 Sinkronisasi dengan PWA (Frontend)
-
-Backend didesain agar dapat tersinkronisasi mulus dengan aplikasi React (yang telah dikonfigurasi sebagai *Progressive Web App* / PWA).
-
-1. **Sinkronisasi Data Profil & Riwayat (REST API)**: 
-   Setiap kali pengguna melakukan pembaruan profil atau pengaturan perangkat di PWA, frontend mengirimkan *request* HTTP (seperti `POST` atau `PUT`) ke `http://127.0.0.1:8081/api/...`. Backend SQLite akan langsung menyimpan perubahan ini secara permanen.
-   
-2. **Komunikasi Real-Time (WebSocket)**:
-   PWA mengandalkan koneksi persisten ke `ws://127.0.0.1:8080` untuk menerima aliran (*streaming*) grafik detak jantung EKG tanpa *overhead* (hambatan) koneksi ulang HTTP biasa.
-   
-3. **Mekanisme Fallback (Mode Offline PWA)**:
-   Jika backend terputus atau dimatikan, antarmuka PWA dilengkapi dengan *Local Storage Fallback*. PWA tetap dapat dioperasikan secara fungsional (untuk berpindah halaman, melihat riwayat *cache*, atau menyimpan profil tiruan) berkat fitur *Service Worker* dan penyimpanan lokal, menjamin UX (Pengalaman Pengguna) yang tidak terputus.
-
----
-
-## ⚙️ Cara Setup & Menjalankan Frontend
-
-### Persyaratan (Prerequisites)
-- **Node.js** (Rekomendasi versi LTS 18.x atau ke atas).
-- Manajer paket seperti **npm** (biasanya terpasang otomatis bersama Node.js).
-
-### Langkah-langkah Menjalankan
-
-1. **Buka Terminal** baru, lalu arahkan navigasi ke direktori proyek frontend:
-   ```bash
-   cd c:\arrhythmia-detection-dashboard
-   ```
-2. **Instalasi Dependensi**. Jalankan perintah ini (hanya perlu dilakukan pertama kali atau jika ada penambahan pustaka baru):
-   ```bash
-   npm install
-   ```
-3. **Jalankan *Development Server***:
-   ```bash
-   npm run dev
-   ```
-4. **Buka Aplikasi di Browser**. 
-   Secara *default*, Vite akan menjalankan aplikasi di `http://localhost:5173` (perhatikan log di terminal Anda untuk tautan spesifik). Buka tautan tersebut menggunakan peramban web favorit Anda.
-
-### Perintah Tambahan (NPM Scripts)
-- `npm run build`: Melakukan proses kompilasi TypeScript dan mem-*build* aplikasi agar siap di-*deploy* ke tahap produksi (berada di folder `dist/`).
-- `npm run lint`: Memeriksa potensi kesalahan/standar kode dengan cepat (memanfaatkan `oxlint`).
-- `npm run preview`: Membuka server lokal (*preview*) untuk melihat dan menguji *build* versi produksi yang telah dikompilasi sebelumnya.
-
----
-
-## 🔄 Mekanisme Streaming WebSocket (Backend Internal)
-
-Dalam sistem ini, backend (Rust) memegang kendali penuh atas mekanisme pengaturan ritme pengiriman aliran data EKG (dari file CSV ke WebSocket) agar persis menyerupai alat fisik medis *real-time*.
-
-1. **Chunking Data (Pemaketan):** 
-   Alih-alih mengirim titik koordinat satu per satu yang akan membuat jaringan kewalahan (karena *overhead* WebSocket), backend memotong (chunk) aliran data dalam bentuk *batch*.
-   
-2. **Frekuensi Sampling (250Hz):** 
-   Sistem diatur pada asumsi frekuensi *sampling rate* dasar 250Hz. Backend mengelompokkan secara spesifik **25 sampel data** menjadi satu *chunk* paket transmisi.
-   
-3. **Delay Real-Time Presisi:** 
-   Dalam *sampling rate* 250Hz, 25 sampel merepresentasikan durasi waktu tepat **100 milidetik (ms)**. Oleh karena itu, *thread* pengiriman backend akan menerapkan sinkronisasi jeda waktu otomatis (*sleep_duration*) selama 100ms setiap kali selesai mengirimkan satu *chunk* paket ke frontend.
-   
-4. **Aliran Tanpa Henti (Seamless Looping):** 
-   Skema ini menjamin kelancaran *streaming real-time* yang sangat konsisten, setara dengan kecepatan sapuan standar perekaman di atas kertas termal EKG (25 mm/s). Ketika pointer pembacaan backend telah mencapai titik data terakhir pada file rekaman CSV, sistem akan otomatis mereset siklus dari titik nol (*looping*), mensimulasikan aliran detak jantung pasien yang terus menyala.
+New frame/image files have delayed cleanup reservations. Committed references preserve the file; abandoned writes and queued deletions are reconciled by housekeeping. Failures are logged with a cleanup ID and retried. The cleanup worker canonicalizes every deletion path.
