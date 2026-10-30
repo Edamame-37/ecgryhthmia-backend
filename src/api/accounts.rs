@@ -258,6 +258,6 @@ async fn stats(
     Extension(identity): Extension<Identity>,
 ) -> ApiResult<Json<Value>> {
     identity.admin()?;
-    let value:Value=sqlx::query_scalar("SELECT jsonb_build_object('total_patients',(SELECT count(*) FROM patients),'total_doctors',(SELECT count(*) FROM doctors),'active_devices',(SELECT count(*) FROM devices WHERE last_seen_at>now()-interval '30 seconds'),'critical_alerts',(SELECT count(*) FROM frame_records WHERE label NOT IN ('Normal','NORM','NSR','Non Arrhythmia','UNKNOWN') AND created_at>=current_date AND deleted_at IS NULL))").fetch_one(&state.pool).await?;
+    let value:Value=sqlx::query_scalar("SELECT jsonb_build_object('total_patients',(SELECT count(*) FROM patients),'total_doctors',(SELECT count(*) FROM doctors),'active_devices',(SELECT count(*) FROM devices WHERE last_seen_at>now()-interval '30 seconds'),'critical_alerts',(SELECT count(*) FROM frame_records WHERE regexp_replace(upper(btrim(label)),'\\s+',' ','g') NOT IN ('','NORMAL','NORM','NSR','NON ARITMIA','NON ARRHYTHMIA','UNKNOWN','UNAVAILABLE','UNCLASSIFIED') AND created_at>=current_date AND deleted_at IS NULL))").fetch_one(&state.pool).await?;
     Ok(Json(value))
 }
