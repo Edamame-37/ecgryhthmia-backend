@@ -11,6 +11,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::{Postgres, Transaction};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/devices", get(list))
@@ -24,7 +25,7 @@ async fn list(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
 ) -> ApiResult<Json<Value>> {
-    let devices=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(d) FROM (SELECT d.id,d.name,d.last_seen_at,d.telemetry,CASE WHEN d.last_seen_at IS NULL THEN 'Unknown' WHEN d.last_seen_at>now()-interval '30 seconds' THEN 'Online' ELSE 'Offline' END AS status,p.id AS assigned_to FROM devices d LEFT JOIN patients p ON p.device_id=d.id WHERE $1='admin' OR ($1='pasien' AND p.account_id=$2) OR ($1='dokter' AND p.primary_doctor_id=$3) ORDER BY d.id) d").bind(identity.role.as_str()).bind(&identity.account_id).bind(&identity.profile_id).fetch_all(&state.pool).await?;
+    let devices=sqlx::query_scalar::<_,Value>("SELECT to_jsonb(d) FROM (SELECT d.id,d.name,d.hardware_id,CASE WHEN d.hardware_id IS NULL THEN 'unmapped' ELSE 'mapped' END AS mapping_status,d.last_seen_at,d.telemetry,CASE WHEN d.last_seen_at IS NULL THEN 'Unknown' WHEN d.last_seen_at>now()-interval '30 seconds' THEN 'Online' ELSE 'Offline' END AS status,p.id AS assigned_to FROM devices d LEFT JOIN patients p ON p.device_id=d.id WHERE $1='admin' OR ($1='pasien' AND p.account_id=$2) OR ($1='dokter' AND p.primary_doctor_id=$3) ORDER BY d.id) d").bind(identity.role.as_str()).bind(&identity.account_id).bind(&identity.profile_id).fetch_all(&state.pool).await?;
     if identity.role != Role::Admin {
         return Ok(Json(json!(devices)));
     }
@@ -42,6 +43,7 @@ async fn list(
 #[serde(deny_unknown_fields)]
 struct DeviceInput {
     name: String,
+    hardware_id: Option<String>,
     mqtt_broker: String,
     mqtt_port: i32,
     mqtt_topic: String,
@@ -49,8 +51,20 @@ struct DeviceInput {
     mqtt_password: Option<String>,
 }
 impl DeviceInput {
-    fn validate(&self, state: &AppState) -> ApiResult<()> {
-        super::authorization::validate_id(&self.name)?;
+    fn normalize(mut self, state: &AppState) -> ApiResult<Self> {
+        self.name = self.name.trim().to_owned();
+        self.mqtt_broker = self.mqtt_broker.trim().to_owned();
+        self.mqtt_topic = self.mqtt_topic.trim().to_owned();
+        self.mqtt_username = self.mqtt_username.trim().to_owned();
+        self.hardware_id = self.hardware_id.map(|value| value.trim().to_owned());
+        if self.name.is_empty() || self.name.chars().count() > 200 {
+            return Err(ApiError::bad(
+                "Device display name must contain 1 to 200 characters",
+            ));
+        }
+        if let Some(hardware_id) = &self.hardware_id {
+            super::authorization::validate_id(hardware_id)?;
+        }
         if self.mqtt_username.len() > 200
             || self.mqtt_password.as_ref().is_some_and(|v| v.len() > 1024)
         {
@@ -61,7 +75,52 @@ impl DeviceInput {
             &self.mqtt_broker,
             self.mqtt_port,
             &self.mqtt_topic,
-        )
+        )?;
+        Ok(self)
+    }
+}
+async fn lock_device_identities(transaction: &mut Transaction<'_, Postgres>) -> ApiResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('device-hardware-identities',0))")
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+async fn ensure_hardware_id_available(
+    transaction: &mut Transaction<'_, Postgres>,
+    device_id: &str,
+    hardware_id: &str,
+) -> ApiResult<()> {
+    if device_id == hardware_id {
+        return Err(ApiError::conflict(
+            "Hardware identity must differ from the internal device ID",
+        ));
+    }
+    let conflict: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM devices WHERE id<>$1 AND (id=$2 OR hardware_id=$2 OR hardware_id=$1))",
+    )
+    .bind(device_id)
+    .bind(hardware_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if conflict {
+        return Err(ApiError::conflict(
+            "Hardware identity is already assigned to another device",
+        ));
+    }
+    Ok(())
+}
+async fn saved_response(state: AppState, id: String) -> Json<Value> {
+    let ingestion = crate::services::ingestion::start(state.clone());
+    match crate::network::mqtt_listener::connect_device(state, &id, ingestion).await {
+        Ok(()) => {
+            Json(json!({"success":true,"saved":true,"id":id,"connection_status":"connecting"}))
+        }
+        Err(error) => {
+            tracing::warn!(device_id=id,error=?error,"Device saved but MQTT listener could not start");
+            Json(
+                json!({"success":true,"saved":true,"id":id,"connection_status":"unavailable","connection_message":"Configuration saved; review hardware mapping and broker connectivity"}),
+            )
+        }
     }
 }
 async fn add(
@@ -70,7 +129,11 @@ async fn add(
     Json(body): Json<DeviceInput>,
 ) -> ApiResult<Json<Value>> {
     identity.admin()?;
-    body.validate(&state)?;
+    let body = body.normalize(&state)?;
+    let hardware_id = body
+        .hardware_id
+        .as_deref()
+        .ok_or_else(|| ApiError::bad("Hardware ID required"))?;
     let password = body
         .mqtt_password
         .as_deref()
@@ -78,16 +141,17 @@ async fn add(
         .ok_or_else(|| ApiError::bad("MQTT password required"))?;
     let id = crate::db::postgres::new_id("dev");
     let mut transaction = state.pool.begin().await?;
-    sqlx::query("INSERT INTO devices(id,name) VALUES($1,$2)")
+    lock_device_identities(&mut transaction).await?;
+    ensure_hardware_id_available(&mut transaction, &id, hardware_id).await?;
+    sqlx::query("INSERT INTO devices(id,name,hardware_id) VALUES($1,$2,$3)")
         .bind(&id)
         .bind(&body.name)
+        .bind(hardware_id)
         .execute(&mut *transaction)
         .await?;
     sqlx::query("INSERT INTO device_credentials(device_id,mqtt_broker,mqtt_port,mqtt_topic,mqtt_username,mqtt_password) VALUES($1,$2,$3,$4,$5,$6)").bind(&id).bind(body.mqtt_broker).bind(body.mqtt_port).bind(body.mqtt_topic).bind(body.mqtt_username).bind(password).execute(&mut *transaction).await?;
     transaction.commit().await?;
-    let ingestion = crate::services::ingestion::start(state.clone());
-    crate::network::mqtt_listener::connect_device(state, &id, ingestion).await?;
-    Ok(Json(json!({"success":true,"id":id})))
+    Ok(saved_response(state, id).await)
 }
 async fn edit(
     State(state): State<AppState>,
@@ -96,8 +160,10 @@ async fn edit(
     Json(body): Json<DeviceInput>,
 ) -> ApiResult<Json<Value>> {
     identity.admin()?;
-    body.validate(&state)?;
+    let body = body.normalize(&state)?;
+    super::authorization::validate_id(&id)?;
     let mut transaction = state.pool.begin().await?;
+    lock_device_identities(&mut transaction).await?;
     sqlx::query("SELECT id FROM devices WHERE id=$1 FOR UPDATE")
         .bind(&id)
         .fetch_one(&mut *transaction)
@@ -106,16 +172,18 @@ async fn edit(
     if active {
         return Err(ApiError::conflict("Cannot edit a recording device"));
     }
-    sqlx::query("UPDATE devices SET name=$1,config_revision=config_revision+1 WHERE id=$2")
+    if let Some(hardware_id) = &body.hardware_id {
+        ensure_hardware_id_available(&mut transaction, &id, hardware_id).await?;
+    }
+    sqlx::query("UPDATE devices SET name=$1,hardware_id=COALESCE($2,hardware_id),config_revision=config_revision+1 WHERE id=$3")
         .bind(body.name)
+        .bind(body.hardware_id)
         .bind(&id)
         .execute(&mut *transaction)
         .await?;
     sqlx::query("UPDATE device_credentials SET mqtt_broker=$1,mqtt_port=$2,mqtt_topic=$3,mqtt_username=$4,mqtt_password=COALESCE(NULLIF($5,''),mqtt_password) WHERE device_id=$6").bind(body.mqtt_broker).bind(body.mqtt_port).bind(body.mqtt_topic).bind(body.mqtt_username).bind(body.mqtt_password).bind(&id).execute(&mut *transaction).await?;
     transaction.commit().await?;
-    let ingestion = crate::services::ingestion::start(state.clone());
-    crate::network::mqtt_listener::connect_device(state, &id, ingestion).await?;
-    Ok(Json(json!({"success":true})))
+    Ok(saved_response(state, id).await)
 }
 async fn command(
     State(state): State<AppState>,
@@ -144,10 +212,7 @@ async fn assign(
     Path(device): Path<String>,
     Json(body): Json<AssignInput>,
 ) -> ApiResult<Json<Value>> {
-    let device: String = sqlx::query_scalar("SELECT id FROM devices WHERE id=$1 OR name=$1")
-        .bind(device)
-        .fetch_one(&state.pool)
-        .await?;
+    let device = super::authorization::resolve_device_id(&state.pool, &device).await?;
     let mut transaction = state.pool.begin().await?;
     sqlx::query("SELECT id FROM devices WHERE id=$1 FOR UPDATE")
         .bind(&device)
