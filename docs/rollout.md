@@ -1,5 +1,13 @@
 # Staging and production rollout
 
+## 2.0.0-rc.1 gates
+
+1. Run `check_db` read-only against an isolated restore before and after explicit migrations `2026102709` and `2026102710`. API readiness requires `ready=true`; acquisition additionally requires `acquisition_ready=true`.
+2. Review every nullable `devices.hardware_id` against firmware inventory. Never infer it from a display name. Keep acquisition stopped until all intended devices are mapped.
+3. Run `cargo run --bin reconcile -- --inventory` for a read-only aggregate of missing, outside-root, oversized, ambiguous, and unmapped legacy sources before preparing any per-session manifest.
+4. Use the checked-in domains `ecgrhythmia.cloud`, `www.ecgrhythmia.cloud`, `api.ecgrhythmia.cloud`, and the reviewed Supabase project. Production runtime must have `APP_ENV=production`, explicit origins/brokers/absolute storage paths, and `APPLY_MIGRATIONS=false`.
+5. Migration `2026102710` removes a reintroduced legacy `accounts.password_hash` idempotently. Confirm the old password-login binary is retired and a verified backup exists before cutover.
+
 The configured Supabase database received the explicitly approved startup/schema upgrade on 28 October 2026; see [schema-upgrade.md](schema-upgrade.md) for backup and preservation evidence. Remote application deployment and the remaining runtime acceptance checks are separate and pending. Local fixtures are not proof of a production cutover.
 
 ## Before migration
