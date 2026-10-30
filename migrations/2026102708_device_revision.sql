@@ -1,0 +1,1 @@
+ALTER TABLE devices ADD COLUMN config_revision BIGINT NOT NULL DEFAULT 1;
