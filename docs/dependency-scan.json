@@ -1,0 +1,27 @@
+{
+  "scanner": "OSV querybatch",
+  "scanned_at": "2026-10-27T14:19:09.995566+00:00",
+  "packages_checked": 306,
+  "matches": [
+    {
+      "name": "block-buffer",
+      "version": "0.10.4",
+      "advisories": [
+        {
+          "id": "GHSA-qwgh-2vcv-g2f7",
+          "modified": "2026-08-19T19:30:06.686866Z"
+        }
+      ]
+    },
+    {
+      "name": "rsa",
+      "version": "0.9.10",
+      "advisories": [
+        {
+          "id": "RUSTSEC-2023-0071",
+          "modified": "2026-09-14T09:45:02.996132Z"
+        }
+      ]
+    }
+  ]
+}
