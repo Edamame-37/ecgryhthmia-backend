@@ -1,2 +1,12 @@
-pub mod routes;
+pub mod accounts;
 pub mod auth;
+pub mod authorization;
+pub mod devices;
+pub mod error;
+pub mod impersonation;
+pub mod jwks;
+pub mod limits;
+pub mod patients;
+pub mod recordings;
+pub mod routes;
+pub mod stream;
