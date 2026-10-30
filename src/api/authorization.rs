@@ -149,11 +149,7 @@ impl Identity {
         Ok(patient)
     }
     pub async fn device(&self, pool: &PgPool, id: &str) -> ApiResult<String> {
-        let device: String = sqlx::query_scalar("SELECT id FROM devices WHERE id=$1 OR name=$1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?
-            .ok_or_else(ApiError::missing)?;
+        let device = resolve_device_id(pool, id).await?;
         if self.role == Role::Admin {
             return Ok(device);
         }
@@ -168,6 +164,21 @@ impl Identity {
             }
         }
         Err(ApiError::forbidden())
+    }
+}
+pub async fn resolve_device_id(pool: &PgPool, id: &str) -> ApiResult<String> {
+    validate_id(id)?;
+    let matches: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM devices WHERE id=$1 OR hardware_id=$1 LIMIT 2")
+            .bind(id)
+            .fetch_all(pool)
+            .await?;
+    match matches.as_slice() {
+        [device] => Ok(device.clone()),
+        [] => Err(ApiError::missing()),
+        _ => Err(ApiError::conflict(
+            "Device identity is ambiguous; administrator review required",
+        )),
     }
 }
 pub fn validate_id(id: &str) -> ApiResult<()> {
